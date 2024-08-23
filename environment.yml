@@ -1,0 +1,22 @@
+channels:
+  - apple
+  - pytorch
+dependencies:
+  - python=3.11
+  - pytorch::pytorch
+  - torchvision
+  - torchaudio
+  - torchmetrics
+  - lightning
+  - scikit-learn
+  - polars
+  - matplotlib
+  - seaborn
+  - tqdm
+  - black
+  - notebook
+  - tensorboard
+  - optuna
+  - pip
+  - pip:
+      - ray[all]
