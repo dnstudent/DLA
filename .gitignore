@@ -4,6 +4,7 @@ lightning_logs/
 /PGA_LSTM
 /results
 /examples
+/data
 fit-perf_logs*.txt
 
 ### macOS template

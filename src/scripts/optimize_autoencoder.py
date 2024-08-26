@@ -13,7 +13,7 @@ from rich.progress import track
 from sklearn.model_selection import KFold
 from torch.utils import data as tdata
 
-from src.datasets.fcrdataset import fcr_dataset
+from src.datasets.fcrdatasets import fcr_autoencoder_dataset
 from src.datasets.transformers import StandardScaler, scale_wds
 from src.datasets.windowed import WindowedDataset
 from src.models.autoencoder import LitTemporalAutoencoder
@@ -39,7 +39,7 @@ def define_hparams(trial: optuna.Trial):
     return {"rnn_module_name": rnn_module_name, "lr": lr, "optimizer_name": optim_name}
 
 def objective(accelerator, max_epochs, patience, csv_path, work_dir, n_devices, profile, decoder_timesteps, representation_size):
-    X, y, t = fcr_dataset(csv_path, WINDOW_SIZE)
+    X, y, t = fcr_autoencoder_dataset(csv_path, WINDOW_SIZE)
     n_features = X.shape[-1]-2 # Two of the columns are doy
     tads = WindowedDataset(tdata.TensorDataset(torch.from_numpy(X)), times=t)
     def _fn(trial: optuna.Trial):
