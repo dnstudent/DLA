@@ -52,3 +52,21 @@ def actual_density(temp):
 def density(temp):
     return 1 + actual_density(temp)
 
+def normalize_inputs(x_train, x_test, y_train, y_test):
+    x_means, x_stds = x_train.mean(axis=(0,1))[None, None, :], x_train.std(axis=(0,1))[None, None, :]
+    y_means, y_stds = y_train.mean(axis=(0,1))[None, None, :], y_train.std(axis=(0,1))[None, None, :]
+    return (x_train - x_means) / x_stds, (x_test - x_means) / x_stds, (y_train - y_means) / y_stds, (y_test - y_means) / y_stds, x_means, x_stds, y_means, y_stds
+
+def train_test_split_nd(*arrays, test_size, shuffle=True, random_state=None):
+    arrays = [*arrays]
+    n_elements = arrays[0].shape[0]
+    indices = np.arange(n_elements, dtype=np.int32)
+    if shuffle:
+        if random_state is not None:
+            np.random.seed(random_state)
+        np.random.shuffle(indices)
+    if 0 < test_size <= 1:
+        test_size = int(n_elements * test_size)
+    train_indices = indices[:-test_size]
+    test_indices = indices[-test_size:]
+    return tuple([(arr[train_indices], arr[test_indices]) for arr in arrays])
