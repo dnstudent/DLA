@@ -1,13 +1,14 @@
-from itertools import chain
 from typing import Any
 
 import lightning as L
 import torch
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
 from torch import nn
-from torch.nn.functional import mse_loss, dropout, relu
+from torch.nn.functional import mse_loss
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torchmetrics.functional import r2_score, mean_squared_error
+from torchmetrics.functional import mean_squared_error
+
+from .tools import monotonic_loss
 
 
 class DensityLSTM(nn.Module):
@@ -37,35 +38,9 @@ class TemperatureRegressor(nn.Sequential):
     def __init__(self, n_features):
         super().__init__(
             nn.Linear(n_features+1, 5),
-            nn.ELU(alpha=1),
+            nn.ELU(alpha=1.0),
             nn.Linear(5, 1)
         )
-
-class MCSampler(L.LightningModule):
-    def __init__(self, model, sample_size):
-        super().__init__()
-        self.model = model
-        self.sample_size = sample_size
-
-    def training_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
-        return self.model.training_step(*args, **kwargs)
-
-    def validation_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
-        return self.model.validation_step(*args, **kwargs)
-
-    def forward(self, *args: Any, **kwargs: Any) -> Any:
-        return self.model.forward(*args, **kwargs)
-
-    def sample(self, x, sample_size):
-        self.train()
-        results = [self(x) for _ in range(sample_size)]
-        return torch.stack(results, dim=-1)
-
-    def predict_step(self, batch, *args: Any, **kwargs: Any) -> Any:
-        return self.sample(batch[0], self.sample_size)
-
-    def configure_optimizers(self):
-        return self.model.configure_optimizers()
 
 class LitLSTMBaseline(L.LightningModule):
     def __init__(self, n_features, initial_lr, lr_decay_rate, weight_decay, dropout_p=0.2):
@@ -85,8 +60,8 @@ class LitLSTMBaseline(L.LightningModule):
     def training_step(self, batch, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
         x, y = batch
         y_hat = self(x)
-        z_loss = mse_loss(y_hat[..., 1], y[..., 1])
         t_loss = mse_loss(y_hat[..., 0], y[..., 0])
+        z_loss = mse_loss(y_hat[..., 1], y[..., 1])
         loss = t_loss + z_loss
         self.log_dict({"train/loss/t": t_loss, "train/loss/z": z_loss, "train/loss": loss})
         return loss
@@ -102,6 +77,9 @@ class LitLSTMBaseline(L.LightningModule):
         self.log_dict({"valid/loss/t": t_loss, "valid/loss/z": z_loss, "valid/loss": loss, "valid/score/t": t_score, "valid/score/z": z_score, "hp_score": t_score})
         return loss
 
+    def predict_step(self, batch, *args: Any, **kwargs: Any) -> Any:
+        return self(batch[0])
+
     def configure_optimizers(self) -> OptimizerLRScheduler:
         optimizer = torch.optim.Adam(
             self.parameters(),
@@ -112,128 +90,50 @@ class LitLSTMBaseline(L.LightningModule):
         lr_scheduler = ReduceLROnPlateau(optimizer, factor=self.lr_decay_rate, patience=100, min_lr=5e-6, threshold=5e-3, threshold_mode="abs")
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "train/loss"}
 
-class LitMCBaselineLSTM(L.LightningModule):
-    def __init__(self, n_features, n_linear_layers, dropout_rate, mc_iterations, weight_decay, initial_lr, lr_decay_rate, n_recurrent_layers=1):
-        super().__init__()
-        self.dropout_rate = dropout_rate
-        self.n_features = n_features
-        self.mc_iterations = mc_iterations
-        self.weight_decay = weight_decay
-        self.n_recurrent_layers = n_recurrent_layers
-        self.n_linear_layers = n_linear_layers
-        self.initial_lr = initial_lr
-        self.lr_decay_rate = lr_decay_rate
-        recurrent_dropout_rate = dropout_rate if n_recurrent_layers > 1 else 0
-        self.recurrent_layer = nn.LSTM(self.n_features, num_layers=n_recurrent_layers, hidden_size=8, batch_first=True, dropout=recurrent_dropout_rate)
-        linear1 = nn.Linear(8, 5)
-        self.linear_layers = [linear1]
-        for _ in range(self.n_linear_layers - 1):
-            self.linear_layers.append(nn.Linear(5, 5))
-        self.output_layer = nn.Linear(5, 1)
-        self.save_hyperparameters()
+class LitPGLLSTM(LitLSTMBaseline):
+    def __init__(self, n_features, initial_lr, lr_decay_rate, weight_decay, physics_penalty_lambda, dropout_p=0.2):
+        super().__init__(n_features, initial_lr, lr_decay_rate, weight_decay, dropout_p)
+        self.physics_penalty_lambda = physics_penalty_lambda
 
-    def forward(self, x, use_dropout):
-        x = relu(dropout(self.recurrent_layer(x)[0], training=use_dropout))
-        for layer in self.linear_layers:
-            x = relu(dropout(layer(x), training=use_dropout))
-        return self.output_layer(x)
-
-    def sample(self, x, sample_size):
-        results = [self(x, use_dropout=True) for _ in range(sample_size)]
-        return torch.concatenate(results, dim=2)
-
-    def training_step(self, batch, batch_idx, *args, **kwargs) -> STEP_OUTPUT:
+    def training_step(self, batch, *args, **kwargs) -> STEP_OUTPUT:
         x, y = batch
-        d_hat = relu(dropout(self.recurrent_layer(x)[0], training=True))
-        x = d_hat
-        for layer in self.linear_layers:
-            x = relu(dropout(layer(x), training=True))
-        T_hat = self.output_layer(x)
-        # y_hat = self(x, use_dropout=True)
-        T_loss = mse_loss(T_hat, y[..., ])
-        self.log_dict({"train/loss": loss, "train/lr": self.lr_schedulers().get_last_lr()[-1]})
+        y_hat = self(x)
+        t_hat = y_hat[..., 0]
+        z_hat = y_hat[..., 1]
+        t_loss = mse_loss(t_hat, y[..., 0])
+        z_loss = mse_loss(z_hat, y[..., 1])
+        mono_loss = monotonic_loss(z_hat, ascending=True)
+        loss = t_loss + z_loss + self.physics_penalty_lambda*mono_loss
+        self.log_dict({
+            "train/loss/t": t_loss,
+            "train/loss/z": z_loss,
+            "train/loss/mono": mono_loss,
+            "train/loss": loss
+        }, on_step=False, on_epoch=True)
         return loss
 
-    def validation_step(self, batch, batch_idx, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
+    def validation_step(self, batch, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
         x, y = batch
-        y_hat = self(x, use_dropout=False)
-        loss = mse_loss(y_hat, y)
-        nrmse = -mean_squared_error(y_hat, y, squared=False)
-        r2 = r2_score(y_hat.reshape((y.shape[0], -1)), y.reshape((y.shape[0], -1)))
-        self.log_dict({"valid/loss": loss, "valid/score/nrmse": nrmse, "valid/score/r2": r2, "hp_metric": nrmse})
+        y_hat = self(x)
+        t_hat = y_hat[..., 0]
+        t = y[..., 0]
+        z_hat = y_hat[..., 1]
+        z = y[..., 1]
+        t_loss = mse_loss(t_hat, t)
+        t_score = -mean_squared_error(t_hat, t)
+        z_loss = mse_loss(z_hat, z)
+        z_score = -mean_squared_error(z_hat, z)
+        mono_loss = monotonic_loss(z_hat, ascending=True, strict=True)
+        mono_score = monotonic_loss(z_hat, ascending=False, strict=False)
+        loss = t_loss + z_loss + self.physics_penalty_lambda * mono_loss
+        self.log_dict({
+                "valid/loss/t": t_loss,
+                "valid/loss/z": z_loss,
+                "valid/loss/mono": mono_loss,
+                "valid/loss": loss,
+                "valid/score/t": t_score,
+                "valid/score/z": z_score,
+                "valid/score/monotonicity": mono_score,
+                "hp_metric": t_score
+            })
         return loss
-
-    def predict_step(self, batch, batch_idx, *args: Any, **kwargs: Any) -> Any:
-        return self.sample(batch[0], self.mc_iterations)
-
-    def configure_optimizers(self) -> OptimizerLRScheduler:
-        optimizer = torch.optim.Adam(
-            # self.parameters(),
-            [{"params": chain(*map(lambda l: l.parameters(), self.linear_layers + [self.output_layer])), "weight_decay": self.weight_decay},
-            {"params": self.recurrent_layer.parameters()}],
-            lr=self.initial_lr)
-        lr_scheduler = ReduceLROnPlateau(optimizer, factor=self.lr_decay_rate, patience=100, min_lr=5e-6, threshold=5e-3, threshold_mode="abs")
-        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "train/loss"}
-
-class LitMCPGLLSTM(L.LightningModule):
-    def __init__(self, n_features, n_linear_layers, dropout_rate, mc_iterations, weight_decay, initial_lr, lr_decay_rate, n_recurrent_layers=1):
-        super().__init__()
-        self.dropout_rate = dropout_rate
-        self.n_features = n_features
-        self.mc_iterations = mc_iterations
-        self.weight_decay = weight_decay
-        self.n_recurrent_layers = n_recurrent_layers
-        self.n_linear_layers = n_linear_layers
-        self.initial_lr = initial_lr
-        self.lr_decay_rate = lr_decay_rate
-        recurrent_dropout_rate = dropout_rate if n_recurrent_layers > 1 else 0
-        self.recurrent_layer = nn.LSTM(self.n_features, num_layers=n_recurrent_layers, hidden_size=8, batch_first=True, dropout=recurrent_dropout_rate)
-        linear1 = nn.Linear(8, 5)
-        self.linear_layers = [linear1]
-        for _ in range(self.n_linear_layers - 1):
-            self.linear_layers.append(nn.Linear(5, 5))
-        self.output_layer = nn.Linear(5, 1)
-        self.save_hyperparameters()
-
-    def forward(self, x, use_dropout):
-        x = relu(dropout(self.recurrent_layer(x)[0], training=use_dropout))
-        for layer in self.linear_layers:
-            x = relu(dropout(layer(x), training=use_dropout))
-        return self.output_layer(x)
-
-    def sample(self, x, sample_size):
-        results = [self(x, use_dropout=True) for _ in range(sample_size)]
-        return torch.concatenate(results, dim=2)
-
-    def training_step(self, batch, batch_idx, *args, **kwargs) -> STEP_OUTPUT:
-        x, y = batch
-        # z = relu(dropout(self.recurrent_layer(x)[0], training=True))
-        # x = z
-        # for layer in self.linear_layers:
-        #     x = relu(dropout(layer(x), training=True))
-        # y_hat = self.output_layer(x)
-        y_hat = self(x, use_dropout=True)
-        loss = mse_loss(y_hat, y)
-        self.log_dict({"train/loss": loss, "train/lr": self.lr_schedulers().get_last_lr()[-1]})
-        return loss
-
-    def validation_step(self, batch, batch_idx, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
-        x, y = batch
-        y_hat = self(x, use_dropout=False)
-        loss = mse_loss(y_hat, y)
-        nrmse = -mean_squared_error(y_hat, y, squared=False)
-        r2 = r2_score(y_hat.reshape((y.shape[0], -1)), y.reshape((y.shape[0], -1)))
-        self.log_dict({"valid/loss": loss, "valid/score/nrmse": nrmse, "valid/score/r2": r2, "hp_metric": nrmse})
-        return loss
-
-    def predict_step(self, batch, batch_idx, *args: Any, **kwargs: Any) -> Any:
-        return self.sample(batch[0], self.mc_iterations)
-
-    def configure_optimizers(self) -> OptimizerLRScheduler:
-        optimizer = torch.optim.Adam(
-            # self.parameters(),
-            [{"params": chain(*map(lambda l: l.parameters(), self.linear_layers + [self.output_layer])), "weight_decay": self.weight_decay},
-            {"params": self.recurrent_layer.parameters()}],
-            lr=self.initial_lr)
-        lr_scheduler = ReduceLROnPlateau(optimizer, factor=self.lr_decay_rate, patience=100, min_lr=5e-6, threshold=5e-3, threshold_mode="abs")
-        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "train/loss"}

@@ -2,25 +2,31 @@ from typing import Any
 
 import lightning as L
 import torch
-from torch import nn
-from torch.nn.functional import dropout
+from lightning.pytorch.utilities.types import STEP_OUTPUT
 
 
-class LitMCDropoutSequential(L.LightningModule):
-    def __init__(self, layers, p, mc_iteration):
+class MCSampler(L.LightningModule):
+    def __init__(self, model, sample_size):
         super().__init__()
-        self.layers = layers
-        self.p = p
-        self.mc_iteration = mc_iteration
+        self.model = model
+        self.sample_size = sample_size
 
-    def forward(self, x, training):
-        for layer in self.layers:
-            x = layer(x)
-            x = dropout(x, p=self.drouput_rate, training=training, inplace=False)
-        return self.output_layer(x)
+    def training_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
+        return self.model.training_step(*args, **kwargs)
 
-    def predict_step(self, batch, batch_idx, *args: Any, **kwargs: Any) -> Any:
-        self.dropout.train()
-        x, _ = batch
-        predictions = [self.dropout(self.model(x)) for _ in range(self.mc_iteration)]
-        return torch.concatenate(predictions, dim=-1)
+    def validation_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
+        return self.model.validation_step(*args, **kwargs)
+
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        return self.model.forward(*args, **kwargs)
+
+    def sample(self, x, sample_size):
+        self.train()
+        results = [self(x) for _ in range(sample_size)]
+        return torch.stack(results, dim=-1)
+
+    def predict_step(self, batch, *args: Any, **kwargs: Any) -> Any:
+        return self.sample(batch[0], self.sample_size)
+
+    def configure_optimizers(self):
+        return self.model.configure_optimizers()
