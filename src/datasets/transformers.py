@@ -58,7 +58,7 @@ class WindowScaler(BaseEstimator, TransformerMixin):
         self.with_std = with_std
 
     def fit(self, X, y=None):
-        self.scaler.fit(X[:, -1, :], y)
+        self.scaler.fit(X, y)
         return self
 
     def transform(self, X, *args, **kwargs):

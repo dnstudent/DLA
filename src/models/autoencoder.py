@@ -4,7 +4,9 @@ import lightning as L
 import torch
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 from torch import nn
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchmetrics.functional import mean_squared_error, r2_score
+
 
 class Encoder(nn.Module):
     def __init__(self, n_features, latent_size, num_layers, module, *args, **kwargs):
@@ -32,39 +34,26 @@ class Decoder(nn.Module):
         x = self.output(x[:, -self.out_seq_length:, :])
         return x
 
-# class Autoencoder(nn.Module):
-#     def __init__(self, n_features, latent_dim, num_layers, in_seq_length, out_seq_length, recurrent_module=nn.RNN, *args, **kwargs):
-#         super(Autoencoder, self).__init__(*args, **kwargs)
-#         self.latent_dim = latent_dim
-#         self.in_seq_len = in_seq_length
-#         self.encoder = Encoder(n_features+2, latent_dim, num_layers, recurrent_module) #nn.Sequential(module(n_features, latent_dim, batch_first=True))
-#         self.decoder = Decoder(latent_dim, n_features, num_layers, in_seq_length, out_seq_length, recurrent_module) #module(latent_dim, n_features, batch_first=True)
-#
-#     def forward(self, x, *args, **kwargs):
-#         encoded = self.encoder(x, *args, **kwargs)
-#         decoded = self.decoder(encoded, *args, **kwargs)
-#         return decoded
-
 class LitTemporalAutoencoder(L.LightningModule):
     def __init__(self, n_features, latent_dim, num_layers, in_seq_length, out_seq_length, recurrent_module, optimizer_class, lr, *args, **kwargs):
         super(LitTemporalAutoencoder, self).__init__(*args, **kwargs)
-        # self.save_hyperparameters(ignore=["recurrent_module", "optimizer_class"])
+        self.encoder = torch.compile(Encoder(n_features, latent_dim, num_layers, recurrent_module))
         # Two features are the doy spec
-        encoder = Encoder(n_features+2, latent_dim, num_layers, recurrent_module)
-        decoder = Decoder(latent_dim, n_features, num_layers, in_seq_length, out_seq_length, recurrent_module)
-        self.autoencoder = torch.compile(nn.Sequential(encoder, decoder))
+        self.decoder = torch.compile(Decoder(latent_dim, n_features-2, num_layers, in_seq_length, out_seq_length, recurrent_module))
+        # self.autoencoder = torch.compile(nn.Sequential(self.encoder, self.decoder))
         self.optimizer_class = optimizer_class
         self.lr = lr
         self.n_features = n_features
         self.in_seq_length = in_seq_length
         self.out_seq_length = out_seq_length
+        self.save_hyperparameters()
 
     def _common_step(self, batch, batch_idx, *args: Any, **kwargs: Any):
         x = batch[0]
         # x = x.view(x.size(0), self.in_seq_length, self.n_features)
         # z = self.encoder(x)
         # y_hat = self.decoder(z)
-        y_hat = self.autoencoder(x)
+        y_hat = self.decoder(self.encoder(x))
         # The last two features are the doy
         y_true = x[:, -self.out_seq_length:, :-2].clone()
         return y_hat, y_true
@@ -74,6 +63,9 @@ class LitTemporalAutoencoder(L.LightningModule):
         loss = nn.functional.mse_loss(y_hat, y_true)
         self.log("train/loss", loss, on_step=False, on_epoch=True)
         return loss
+
+    def predict_step(self, batch, *args: Any, **kwargs: Any) -> Any:
+        return self.encoder(batch[0])
 
     def validation_step(self, batch, batch_idx, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
         y_hat, y_true = self._common_step(batch, batch_idx, *args, **kwargs)
@@ -87,4 +79,6 @@ class LitTemporalAutoencoder(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer = self.optimizer_class(self.parameters(), lr=self.lr)
-        return optimizer
+        lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.95, patience=100, min_lr=1e-5,
+                                         threshold=5e-3, threshold_mode="abs")
+        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "train/loss"}

@@ -27,3 +27,26 @@ class GappedKFold(BaseCrossValidator):
             start, stop = current, current + fold_size
             yield indices[start:stop]
             current = stop
+
+class MaxSizeKFold(BaseCrossValidator):
+    def __init__(self, n_splits, max_val_frac):
+        super().__init__()
+        self.n_splits = n_splits
+        self.max_val_frac = max_val_frac
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return self.n_splits
+
+    def split(self, X, y=None, groups=None, seed=None):
+        n_samples = _num_samples(X)
+        indices = np.arange(n_samples)
+        if seed is not None:
+            np.random.seed(seed)
+        np.random.shuffle(indices)
+        max_val_size = int(n_samples * self.max_val_frac)
+
+        val_size = min(max_val_size, n_samples // self.n_splits)
+        for i in range(self.n_splits):
+            val_indices = indices[i*val_size:(i+1)*val_size]
+            train_indices = np.concatenate([indices[:i*val_size],indices[(i+1)*val_size:]])
+            yield train_indices, val_indices

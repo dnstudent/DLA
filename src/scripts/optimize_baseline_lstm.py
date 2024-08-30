@@ -15,7 +15,7 @@ from torch.utils import data as tdata
 
 from ..datasets.fcrdatasets import fcr_spatiotemporal_dataset
 from ..datasets.tools import normalize_inputs, train_test_split_nd
-from ..models.lstm import LitLSTMBaseline
+from ..models.lstm import LitTZRegressor
 
 def define_hparams(trial: optuna.Trial):
     apply_decay = trial.suggest_int("apply_decay", 0, 1)
@@ -65,7 +65,7 @@ def objective(accelerator, max_epochs, patience, csv_path, work_dir, n_devices, 
                 profiler=profiler,
                 default_root_dir=work_dir
             )
-            model = LitLSTMBaseline(n_features, hparams["initial_lr"], hparams["lr_decay_rate"], hparams["weight_decay"])
+            model = LitTZRegressor(n_features, hparams["initial_lr"], hparams["lr_decay_rate"], hparams["weight_decay"])
 
             trainer.fit(
                 model,
