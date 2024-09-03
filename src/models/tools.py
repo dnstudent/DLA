@@ -1,4 +1,11 @@
 import torch
+from torchmetrics.functional import mean_squared_error
+
+from src.datasets.tools import density
+
+def reverse_tz_loss(t_hat: torch.Tensor, z_hat: torch.Tensor, z_mean, z_std, t_mean, t_std):
+    T_hat = t_hat*t_std + t_mean
+    return mean_squared_error(z_hat, (density(T_hat) - z_mean) / z_std)
 
 def monotonic_entity_loss(input: torch.Tensor, target=None, ascending=True):
     """Computes the monotonic loss on input, defined as the sum of squared transgressions of monotonicity

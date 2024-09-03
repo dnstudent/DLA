@@ -1,10 +1,13 @@
+from pathlib import Path
 from typing import Optional, Tuple, Union
 
 import numpy as np
 import polars as pl
+import polars.selectors as cs
 import torch
 from lightning.pytorch import LightningDataModule
 from lightning.pytorch.utilities.types import EVAL_DATALOADERS
+from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
 
 from .tools import windowed, periodic_day, density
@@ -31,7 +34,6 @@ def fcr_autoencoder_split_dataset(drivers_csv_path: str, window_size: int, test_
     test_indices = indices[:test_size]
     train_ds, test_ds = windowed_dataset.train_test_split(test_indices.copy())
     return train_ds, test_ds, windowed_dataset
-
 
 class FCRAutoencoderDataModule(LightningDataModule):
     def __init__(self, drivers_csv_path: str, n_timesteps: int, batch_size: int, test_frac: float = 0.05, seed: int = 42):
@@ -76,14 +78,56 @@ class FCRAutoencoderDataModule(LightningDataModule):
         assert self.fcr_predict is not None
         return DataLoader(self.fcr_predict, batch_size=self.batch_size, shuffle=False)
 
-def fcr_full_table(csv_path):
-    return pl.read_csv(csv_path).sort("time", "depth")
+def fcr_full_table(ds_dir, embedded_features_csv_path):
+    ds_dir = Path(ds_dir)
+    time_features = pl.read_csv(ds_dir / 'FCR_2013_2018_Drivers.csv', schema_overrides={"time": pl.Date}).with_columns(
+        periodic_day(pl.col("time")).alias("date_components")
+    ).unnest("date_components")
+    glm_temperatures = pl.read_csv(ds_dir / 'FCR_2013_2018_GLM_output.csv', schema_overrides={"time": pl.Date})
+    actual_temperatures = pl.read_csv(ds_dir / 'FCR_2013_2018_Observed_with_GLM_output.csv',
+                                      schema_overrides={"time": pl.Date})
+    if embedded_features_csv_path:
+        temporal_embedded = pl.read_csv(embedded_features_csv_path, schema_overrides={"time": pl.Date}).select("time", cs.matches(r"e\d+"))
+    else:
+        temporal_embedded = pl.DataFrame([pl.Series("time", [], dtype=pl.Date)])
+    # computing the growing degree days feature
+    min_temp = 5
+    time_features = time_features.with_columns(
+        (
+                pl.max_horizontal(
+                    min_temp,
+                    pl.col("AirTemp")
+                )
+                .mean().over(pl.col("time")) - min_temp
+        ).alias("growing_degree_days")
+    ).join(temporal_embedded, on="time", how="left").filter(pl.all_horizontal(cs.by_name(["e1", "AirTemp"], require_all=False)).is_not_null())
+    all_temperatures = (
+        glm_temperatures.with_columns(
+            (pl.col("depth") * 100).cast(pl.Int32)
+        )
+        .join(
+            actual_temperatures.with_columns(
+                (pl.col("depth") * 100).cast(pl.Int32)
+            ), on=["time", "depth"], how="left").drop("temp_glm")
+        .rename({"temp": "glm_temp"})
+        .with_columns(pl.col("depth").truediv(100))
+    )
+    return (
+        all_temperatures
+        .join(time_features, on="time", how="inner")
+        .filter(pl.col("time") >= pl.date(2013, 5, 21))
+        # .drop("time_right")
+        .sort("time", "depth")
+    )
 
-def fcr_spatiotemporal_dataset(table, depth_steps = 28):
-    if type(table) == str:
-        table = fcr_full_table(table)
+def fcr_spatiotemporal_dataset(ds_dir, embedded_features_csv_path, depth_steps=28):
+    table = fcr_full_table(ds_dir, embedded_features_csv_path)
     table = table.filter(pl.col("temp_observed").is_not_null()).sort("time", "depth").drop("time")
     return (
         table.drop(["temp_observed"]).to_numpy().astype(np.float32).reshape((-1, depth_steps, len(table.columns) - 1)),
         table.select(["temp_observed"]).with_columns(density(pl.col("temp_observed")).alias("density")).select(["temp_observed", "density"]).to_numpy().astype(np.float32).reshape((-1, depth_steps, 2))
     )
+
+def fcr_spatiotemporal_split_dataset(ds_dir, embedded_features_csv_path, test_size, depth_steps=28, seed=42, shuffle=False):
+    X, y = fcr_spatiotemporal_dataset(ds_dir, embedded_features_csv_path, depth_steps)
+    return train_test_split(X, y, test_size=test_size, random_state=seed if shuffle else None, shuffle=shuffle)

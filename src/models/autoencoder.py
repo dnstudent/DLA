@@ -72,10 +72,17 @@ class LitTemporalAutoencoder(L.LightningModule):
         loss = nn.functional.mse_loss(y_hat, y_true)
         score1 = -mean_squared_error(y_hat, y_true, squared=False)
         score2 = r2_score(y_hat.reshape((batch[0].size(0), -1)), y_true.reshape((batch[0].size(0), -1)))
-        # score = r2_score(y_hat.reshape((batch[0].size(0), -1)), y_true.reshape((batch[0].size(0), -1)))
         self.log_dict({"valid/loss": loss, "valid/nrmse": score1, "valid/r2": score2, "hp_metric": score1}, on_step=False, on_epoch=True)
-        # self.log("valid/score", score, on_step=False, on_epoch=True)
         return loss #{"valid/loss": loss, "valid/score": score}
+
+    def test_step(self, batch, batch_idx, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
+        y_hat, y_true = self._common_step(batch, batch_idx, *args, **kwargs)
+        loss = nn.functional.mse_loss(y_hat, y_true)
+        score1 = -mean_squared_error(y_hat, y_true, squared=False)
+        score2 = r2_score(y_hat.reshape((batch[0].size(0), -1)), y_true.reshape((batch[0].size(0), -1)))
+        self.log_dict({"test/loss": loss, "test/nrmse": score1, "test/r2": score2},
+                      on_step=False, on_epoch=True)
+        return loss
 
     def configure_optimizers(self):
         optimizer = self.optimizer_class(self.parameters(), lr=self.lr)
