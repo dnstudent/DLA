@@ -60,6 +60,20 @@ class SimpleInitialRegressor(nn.Module):
     def forward(self, w):
         return self.regressor(w[:, -1, :])
 
+class AvgInitialRegressor(nn.Module):
+    def __init__(self, n_input_features: int, forward_size: int, dropout_rate: float):
+        super().__init__()
+        self.n_input_features = n_input_features
+        self.forward_size = forward_size
+        self.dropout_rate = dropout_rate
+        # self.sum_idxs = sum_idxs
+        # all_indices = torch.arange(self.n_input_features, dtype=torch.int32, device=self.sum_idxs.device)
+        # self.avg_idx = torch.tensor([idx for idx in all_indices if idx not in self.sum_idxs], dtype=torch.int32, device=self.sum_idxs.device)
+        self.regressor = nn.Sequential(nn.Linear(n_input_features, forward_size), nn.Dropout(p=dropout_rate), nn.Linear(forward_size, 1))
+
+    def forward(self, w: torch.Tensor):
+        return self.regressor(w.mean(dim=1))
+
 class LSTMInitialRegressor(nn.Module):
     def __init__(self, n_input_features: int, hidden_size: int, forward_size: int, dropout_rate: float):
         super().__init__()
@@ -71,6 +85,6 @@ class LSTMInitialRegressor(nn.Module):
         self.output_layer = nn.Linear(hidden_size, 1)
 
     def forward(self, w):
-        _, (x, _) = self.recurrent(w)
-        x = self.dropout(x)
+        x, _ = self.recurrent(w)
+        x = self.dropout(x[:, -1, :])
         return self.output_layer(x)

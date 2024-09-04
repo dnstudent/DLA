@@ -1,4 +1,5 @@
 import random
+from math import floor
 
 import numpy as np
 import polars as pl
@@ -15,7 +16,6 @@ def windowed(x, window_size):
         if x.shape[0] >= window_size:
             return sliding_window_view(x, window_shape).copy()
     return np.array([], dtype=x.dtype).reshape((0,) + window_shape)
-
 
 def contiguous_split(x: np.array, split_start, split_size):
     x_split = x[split_start:split_start+split_size]
@@ -53,10 +53,37 @@ def training_density(temp):
     """???"""
     return 1 + density(temp)
 
-def normalize_inputs(x_train, x_test, y_train, y_test):
-    x_means, x_stds = x_train.mean(axis=(0,1))[None, None, :], x_train.std(axis=(0,1))[None, None, :]
-    y_means, y_stds = y_train.mean(axis=(0,1))[None, None, :], y_train.std(axis=(0,1))[None, None, :]
-    return (x_train - x_means) / x_stds, (x_test - x_means) / x_stds, (y_train - y_means) / y_stds, (y_test - y_means) / y_stds, x_means, x_stds, y_means, y_stds
+# def normalize_inputs(x_train, x_test, y_train, y_test):
+#     x_means, x_stds = x_train.mean(axis=(0,1))[None, None, :], x_train.std(axis=(0,1))[None, None, :]
+#     y_means, y_stds = y_train.mean(axis=(0,1))[None, None, :], y_train.std(axis=(0,1))[None, None, :]
+#     return (x_train - x_means) / x_stds, (x_test - x_means) / x_stds, (y_train - y_means) / y_stds, (y_test - y_means) / y_stds, x_means, x_stds, y_means, y_stds
+
+def normalize_inputs(train_arrs, test_arrs):
+    var_means = [arr.mean(axis=(0,1))[None, None, :] for arr in train_arrs]
+    var_stds = [arr.std(axis=(0,1))[None, None, :] for arr in train_arrs]
+    return (
+        [(train_arr - var_mean) / var_std for train_arr, var_mean, var_std in zip(train_arrs, var_means, var_stds)],
+        [(test_arr - var_mean) / var_std for test_arr, var_mean, var_std in zip(test_arrs, var_means, var_stds)],
+        var_means,
+        var_stds,
+    )
+
+
+def windowed_unique_date_indices(dates: pl.Series, window_size: int):
+    return (
+        pl.DataFrame(dates)
+        .with_columns(window_dates=pl.date_ranges(start=pl.col("date").dt.offset_by(f"-{window_size - 1}d"), end="date"))
+        .with_row_index("sample_idx")
+        .explode("window_dates")
+        .sort("sample_idx", "window_dates")
+        .with_columns(window_idx=pl.col("window_dates").cum_count().over("sample_idx"))
+        .unique(["date", "window_dates"], maintain_order=True)
+        .select("sample_idx", "window_idx")
+        .to_numpy()
+    )
+
+def normalize_time_window_inputs(w_train, w_test, t_train, t_test):
+    pass
 
 def train_test_split_nd(*arrays, test_size, shuffle=True, random_state=None):
     arrays = [*arrays]
@@ -71,3 +98,35 @@ def train_test_split_nd(*arrays, test_size, shuffle=True, random_state=None):
     train_indices = indices[:-test_size]
     test_indices = indices[-test_size:]
     return tuple([(arr[train_indices], arr[test_indices]) for arr in arrays])
+
+def exclude_temporal_indices(dates, window_size, idxs):
+    dates = pl.DataFrame(dates).with_row_index(name="idx")
+    dates = dates.with_columns(
+        window_dates=pl.date_ranges(start=pl.col("date").dt.offset_by(f"-{window_size - 1}d"), end="date"))
+    selected = dates[idxs].sort("idx")
+    left = (
+        dates
+        .join(selected, on="date", how="anti")
+        .explode("window_dates")
+        .join(selected.explode("window_dates"), on="window_dates", how="anti")
+        .group_by("date", "idx")
+        .agg(n=pl.len())
+        .filter(pl.col("n") == window_size)
+        .select("date", "idx").sort("idx")
+    )
+    left_indices = left["idx"].to_numpy()
+    return left_indices
+
+def split_temporal_indices(dates: pl.Series, window_size: np.ndarray, right_frac: float):
+    indices = np.arange(len(dates))
+    split = int(floor((1 - right_frac) * len(dates)))
+    right_indices = indices[split:]
+    return exclude_temporal_indices(dates, window_size, right_indices), right_indices
+
+def split_temporal_rolling(dates: pl.Series, windowed_data: np.ndarray, *arrs, right_frac: float):
+    n_timesteps = len(windowed_data)
+    assert len(dates) == n_timesteps, "There are different timesteps in w and ts"
+    window_size = windowed_data.shape[1]
+    left_indices, right_indices = split_temporal_indices(dates, window_size, right_frac)
+    return [(dates[left_indices], dates[right_indices])] + [(windowed_data[left_indices], windowed_data[right_indices])] + [(arr[left_indices], arr[right_indices]) for arr in arrs]
+

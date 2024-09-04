@@ -1,6 +1,7 @@
 from typing import Any, Optional
 
 import lightning as L
+import numpy as np
 import torch
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
 from torch import nn, Tensor
@@ -10,13 +11,16 @@ from torchmetrics.functional import mean_squared_error
 
 from .pga import PGADensityLSTM
 from .tools import physical_consistency, physical_inconsistency, reverse_tz_loss
-from .simple_regressors import DummyInitialRegressor, SimpleInitialRegressor, LSTMDensityRegressor, TemperatureRegressor, FullInitialRegressor
+from .simple_regressors import DummyInitialRegressor, SimpleInitialRegressor, AvgInitialRegressor, \
+    LSTMDensityRegressor, TemperatureRegressor, FullInitialRegressor, LSTMInitialRegressor
+
 
 class LitTZRegressor(L.LightningModule):
     def __init__(self,
                  initial_regressor: nn.Module,
                  density_regressor: nn.Module,
                  n_input_features: int,
+                 n_initial_features: Optional[int],
                  initial_lr: float,
                  lr_decay_rate: float,
                  weight_decay: float,
@@ -36,6 +40,8 @@ class LitTZRegressor(L.LightningModule):
         self.dropout_rate = dropout_rate
         self.density_lambda = density_lambda
         self.multiproc = multiproc
+        self.n_input_features = n_input_features
+        self.n_initial_features = n_initial_features
 
     def compute_losses(self, y_hat, y):
         t_loss = mse_loss(y_hat[..., 0], y[..., 0])
@@ -81,21 +87,21 @@ class LitTZRegressor(L.LightningModule):
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "train/loss/total"}
 
 class LitLSTM(LitTZRegressor):
-    def __init__(self, n_input_features: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, density_lambda: float, dropout_rate: float, multiproc: bool):
+    def __init__(self, n_input_features: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, density_lambda: float, dropout_rate: float, multiproc: bool, **kwargs):
         initial_regressor = DummyInitialRegressor()
         density_regressor = LSTMDensityRegressor(n_input_features, dropout_rate)
-        super().__init__(initial_regressor, density_regressor, n_input_features, initial_lr, lr_decay_rate, weight_decay, density_lambda, dropout_rate, multiproc)
+        super().__init__(initial_regressor, density_regressor, n_input_features, None, initial_lr, lr_decay_rate, weight_decay, density_lambda, dropout_rate, multiproc)
         self.save_hyperparameters()
 
 class TheirLSTM(LitLSTM):
-    def __init__(self, n_input_features: int, lr: float, weight_decay: float, density_lambda: float, multiproc: bool):
-        super().__init__(n_input_features, lr, 0.999999999, weight_decay, density_lambda, dropout_rate=0.2, multiproc=multiproc)
+    def __init__(self, n_input_features: int, initial_lr: float, weight_decay: float, density_lambda: float, multiproc: bool, **kwargs):
+        super().__init__(n_input_features, initial_lr, 0.999999999, weight_decay, density_lambda, dropout_rate=0.2, multiproc=multiproc)
 
 class LitPGLLSTM(LitTZRegressor):
-    def __init__(self, n_input_features: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, physics_penalty_lambda: float, density_lambda: float, dropout_rate: float, multiproc: bool):
+    def __init__(self, n_input_features: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, physics_penalty_lambda: float, density_lambda: float, dropout_rate: float, multiproc: bool, **kwargs):
         initial_regressor = DummyInitialRegressor()
         density_regressor = LSTMDensityRegressor(n_input_features, dropout_rate)
-        super().__init__(initial_regressor, density_regressor, n_input_features, initial_lr, lr_decay_rate, weight_decay, density_lambda, dropout_rate, multiproc)
+        super().__init__(initial_regressor, density_regressor, n_input_features, None, initial_lr, lr_decay_rate, weight_decay, density_lambda, dropout_rate, multiproc)
         self.physics_penalty_lambda = physics_penalty_lambda
         self.save_hyperparameters()
 
@@ -107,26 +113,44 @@ class LitPGLLSTM(LitTZRegressor):
         return normal_losses
 
 class TheirPGLLSTM(LitPGLLSTM):
-    def __init__(self, n_input_features: int, lr: float, weight_decay: float, density_lambda: float, physics_penalty_lambda: float, multiproc: bool):
-        super().__init__(n_input_features, lr, 0.999999999, weight_decay, physics_penalty_lambda, density_lambda, dropout_rate=0.2, multiproc=multiproc)
+    def __init__(self, n_input_features: int, initial_lr: float, weight_decay: float, density_lambda: float, physics_penalty_lambda: float, multiproc: bool, **kwargs):
+        super().__init__(n_input_features, initial_lr, 0.999999999, weight_decay, physics_penalty_lambda, density_lambda, dropout_rate=0.2, multiproc=multiproc)
 
 class LitPGALSTM(LitTZRegressor):
-    def __init__(self, initial_regressor: nn.Module, n_input_features: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, hidden_size: int, forward_size: int, density_lambda: float, dropout_rate: float, multiproc: bool):
+    def __init__(self, initial_regressor: nn.Module, n_input_features: int, n_initial_features: Optional[int], initial_lr: float, lr_decay_rate: float, weight_decay: float, hidden_size: int, forward_size: int, density_lambda: float, dropout_rate: float, multiproc: bool, **kwargs):
         density_regressor = PGADensityLSTM(n_input_features, hidden_size, forward_size, dropout_rate)
-        super().__init__(initial_regressor, density_regressor, n_input_features, initial_lr, lr_decay_rate, weight_decay, density_lambda, dropout_rate, multiproc)
+        super().__init__(initial_regressor, density_regressor, n_input_features, n_initial_features, initial_lr, lr_decay_rate, weight_decay, density_lambda, dropout_rate, multiproc)
 
 class TheirPGALSTM(LitPGALSTM):
-    def __init__(self, n_input_features: int, lr: float, weight_decay: float, density_lambda: float, multiproc: bool):
+    def __init__(self, n_input_features: int, initial_lr: float, weight_decay: float, density_lambda: float, multiproc: bool, **kwargs):
         initial_regressor = FullInitialRegressor(0.0)
-        super().__init__(initial_regressor, n_input_features, lr, lr_decay_rate=0.999999999, weight_decay=weight_decay, hidden_size=8, forward_size=5, density_lambda=density_lambda, dropout_rate=0.2, multiproc=multiproc)
+        super().__init__(initial_regressor, n_input_features, None, initial_lr, lr_decay_rate=0.999999999, weight_decay=weight_decay, hidden_size=8, forward_size=5, density_lambda=density_lambda, dropout_rate=0.2, multiproc=multiproc)
 
-class MyPGALSTMZ0(LitPGALSTM):
+class MyPGALSTMZ0v0(LitPGALSTM):
     """PGA con regressor per stato iniziale
     """
-    def __init__(self, n_input_features: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, density_lambda: float, dropout_rate: float, multiproc: bool, hidden_size: int = 8, forward_size: int = 5, initial_regressor=None):
+    def __init__(self, n_input_features: int, n_initial_features: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, density_lambda: float, dropout_rate: float, multiproc: bool, hidden_size: int = 8, forward_size: int = 5, initial_regressor=None, **kwargs):
         if initial_regressor is None:
-            initial_regressor = SimpleInitialRegressor(n_input_features, forward_size, dropout_rate)
-        super().__init__(initial_regressor, n_input_features, initial_lr, lr_decay_rate, weight_decay, hidden_size, forward_size, density_lambda, dropout_rate, multiproc)
+            initial_regressor = SimpleInitialRegressor(n_initial_features, forward_size, dropout_rate)
+        super().__init__(initial_regressor, n_input_features, n_initial_features, initial_lr, lr_decay_rate, weight_decay, hidden_size, forward_size, density_lambda, dropout_rate, multiproc)
+        self.save_hyperparameters(ignore=["initial_regressor"])
+
+class MyPGALSTMZ0v1(LitPGALSTM):
+    """PGA con regressor per stato iniziale
+    """
+    def __init__(self, n_input_features: int, n_initial_features: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, density_lambda: float, dropout_rate: float, multiproc: bool, hidden_size: int = 8, forward_size: int = 5, initial_regressor=None, **kwargs):
+        if initial_regressor is None:
+            initial_regressor = AvgInitialRegressor(n_initial_features, forward_size, dropout_rate)
+        super().__init__(initial_regressor, n_input_features, n_initial_features, initial_lr, lr_decay_rate, weight_decay, hidden_size, forward_size, density_lambda, dropout_rate, multiproc)
+        self.save_hyperparameters(ignore=["initial_regressor"])
+
+class MyPGALSTMZ0v2(LitPGALSTM):
+    """PGA con regressor per stato iniziale
+    """
+    def __init__(self, n_input_features: int, n_initial_features: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, density_lambda: float, dropout_rate: float, multiproc: bool, hidden_size_initial: int = 5, hidden_size_density: int = 8, forward_size: int = 5, initial_regressor=None, **kwargs):
+        if initial_regressor is None:
+            initial_regressor = LSTMInitialRegressor(n_initial_features, hidden_size_initial, forward_size, dropout_rate)
+        super().__init__(initial_regressor, n_input_features, n_initial_features, initial_lr, lr_decay_rate, weight_decay, hidden_size_density, forward_size, density_lambda, dropout_rate, multiproc)
         self.save_hyperparameters(ignore=["initial_regressor"])
 
 class MyPGALSTMLoss(LitPGALSTM):
@@ -136,6 +160,7 @@ class MyPGALSTMLoss(LitPGALSTM):
                  z_mean: Tensor, z_std: Tensor,
                  t_mean: Tensor, t_std: Tensor,
                  n_input_features: int,
+                 n_initial_features: Optional[int],
                  initial_lr: float,
                  lr_decay_rate: float,
                  ttoz_penalty_lambda: float,
@@ -146,10 +171,11 @@ class MyPGALSTMLoss(LitPGALSTM):
                  initial_regressor: Optional[nn.Module] = None,
                  hidden_size: int=8,
                  forward_size: int=5,
+                 **kwargs
         ):
         if not initial_regressor:
             initial_regressor = FullInitialRegressor(0.0)
-        super().__init__(initial_regressor, n_input_features, initial_lr, lr_decay_rate, weight_decay, hidden_size, forward_size, density_lambda, dropout_rate, multiproc)
+        super().__init__(initial_regressor, n_input_features, n_initial_features, initial_lr, lr_decay_rate, weight_decay, hidden_size, forward_size, density_lambda, dropout_rate, multiproc)
         self.ttoz_penalty_lambda = ttoz_penalty_lambda
         self.t_mean = t_mean
         self.t_std = t_std
@@ -165,3 +191,26 @@ class MyPGALSTMLoss(LitPGALSTM):
         normal_losses["total"] += self.ttoz_penalty_lambda * ttoz_physics_loss
         return normal_losses
 
+class MyPGALSTMComb(MyPGALSTMLoss):
+    """PGA con loss extra
+    """
+    def __init__(self,
+                 z_mean: Tensor, z_std: Tensor,
+                 t_mean: Tensor, t_std: Tensor,
+                 n_input_features: int,
+                 n_initial_features: Optional[int],
+                 initial_lr: float,
+                 lr_decay_rate: float,
+                 ttoz_penalty_lambda: float,
+                 weight_decay: float,
+                 density_lambda: float,
+                 dropout_rate: float,
+                 multiproc: bool,
+                 initial_regressor: Optional[nn.Module] = None,
+                 hidden_size: int=8,
+                 forward_size: int=5,
+                 **kwargs
+        ):
+        if not initial_regressor:
+            initial_regressor = LSTMInitialRegressor(n_initial_features,5, 5, dropout_rate)
+        super().__init__(z_mean, z_std, t_mean, t_std, n_input_features, n_initial_features, initial_lr, lr_decay_rate, ttoz_penalty_lambda, weight_decay, density_lambda, dropout_rate, multiproc, initial_regressor, hidden_size, forward_size)
