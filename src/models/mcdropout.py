@@ -12,7 +12,8 @@ class MCSampler(L.LightningModule):
         self.sample_size = sample_size
 
     def training_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
-        return self.model.training_step(*args, **kwargs)
+        # return self.model.training_step(*args, **kwargs)
+        raise NotImplementedError
 
     def validation_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
         return self.model.validation_step(*args, **kwargs)
@@ -20,13 +21,13 @@ class MCSampler(L.LightningModule):
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         return self.model.forward(*args, **kwargs)
 
-    def sample(self, x, sample_size):
+    def sample(self, *args, sample_size):
         self.train()
-        results = [self(x) for _ in range(sample_size)]
+        results = [self(*args) for _ in range(sample_size)]
         return torch.stack(results, dim=-1)
 
-    def predict_step(self, batch, *args: Any, **kwargs: Any) -> Any:
-        return self.sample(batch[0], self.sample_size)
+    def predict_step(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sample(*args, sample_size=self.sample_size)
 
     def configure_optimizers(self):
         return self.model.configure_optimizers()

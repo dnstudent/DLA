@@ -19,22 +19,26 @@ def monotonic_entity_loss(input: torch.Tensor, target=None, ascending=True):
         transgressions = deltas.maximum(torch.zeros_like(deltas))
     return transgressions.square().sum(dim=-1)
 
-def descending_fraction(input: torch.Tensor, tol=0):
+def descending_fraction(input: torch.Tensor, tol, axis, agg_dims):
     """ Fraction of descending terms in the last dimension of the given tensor
+    @param agg_dims:
+    @param axis:
     @param input: a tensor
     @param tol: tolerance to consider a term descending
     @return:
     """
-    if input.shape[-1] < 2:
-        return torch.zeros(input.shape[:-1], device=input.device, dtype=input.dtype)
-    deltas = input.diff(dim=-1)
-    return torch.mean(deltas < -abs(tol), dtype=deltas.dtype)
+    if axis < 0:
+        axis = input.dim() + axis
+    if input.shape[axis] < 2:
+        return torch.zeros(input.shape[:axis] + input.shape[axis+1:], device=input.device, dtype=input.dtype)
+    deltas = input.diff(dim=axis)
+    return torch.mean(deltas < -abs(tol), dtype=deltas.dtype, dim=agg_dims)
 
-def physical_inconsistency(input: torch.Tensor, tol=0):
-    return descending_fraction(input, tol=tol)
+def physical_inconsistency(input: torch.Tensor, tol=0, axis=2, agg_dims=(0,1)):
+    return descending_fraction(input, tol, axis, agg_dims)
 
-def physical_consistency(input: torch.Tensor, tol=0):
-    return 1 - descending_fraction(input, tol=tol)
+def physical_consistency(input: torch.Tensor, tol=0, axis=2, agg_dims=(0,1)):
+    return 1 - descending_fraction(input, tol, axis, agg_dims)
 
 def count_parameters(model, all):
     return sum(p.numel() for p in model.parameters() if all or p.requires_grad)

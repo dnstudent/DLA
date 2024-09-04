@@ -13,7 +13,7 @@ from rich.progress import track
 from sklearn.model_selection import KFold
 from torch.utils import data as tdata
 
-from src.datasets.fcrdatasets import fcr_spatiotemporal_split_dataset
+from src.datasets.fcr import spatiotemporal_split_dataset
 from src.datasets.tools import normalize_inputs, train_test_split_nd
 from src.models import lstm
 
@@ -44,7 +44,7 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
         embedding_path = os.path.join(embedding_dir, f"{embedding_version}.csv")
     else:
         embedding_path = None
-    x, x_test, y, y_test = fcr_spatiotemporal_split_dataset(ds_dir, embedding_path, test_size, shuffle=shuffle_test, seed=seed)
+    x, x_test, y, y_test = spatiotemporal_split_dataset(ds_dir, embedding_path, test_size, shuffle=shuffle_test, seed=seed)
     n_features = x.shape[-1]
     model_class = getattr(lstm, model_name)
     physics_penalty = model_name == "LitPGLLSTM"

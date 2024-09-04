@@ -11,7 +11,6 @@ from torch.nn.parameter import Parameter
 class PGADensityCell(jit.ScriptModule):
     def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float):
         super().__init__()
-        self.dropout = nn.Dropout(dropout_rate)
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.weight_ih = Parameter(torch.empty(4 * hidden_size, input_size))
@@ -48,7 +47,6 @@ class PGADensityCell(jit.ScriptModule):
     @jit.script_method
     def forward(self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
         hp, cp, zp = h
-        x = self.dropout(x)
         gates = (
             torch.mm(x, self.weight_ih.t())
             + torch.mm(hp, self.weight_hh.t())
@@ -86,14 +84,13 @@ class PGADensityLSTM(jit.ScriptModule):
         self.density_layer = PGADensityLayer(input_size, hidden_size, forward_size, dropout_rate)
 
     @jit.script_method
-    def forward(self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]) -> Tensor:
-        if h[0] is None:
-            zeros = torch.zeros((x.size(0), self.density_layer.cell.hidden_size), dtype=x.dtype, device=x.device)
-            # PROBLEMA: la densità iniziale non può essere 0: essendo crescente ed essendo gli input normalizzati sarà sempre < 0!!
-            h = (zeros, zeros, h[2])
+    def forward(self, x: Tensor, z0: Tensor) -> Tensor:
         no_batch = x.ndim == 2
         if no_batch:
             x = x.unsqueeze(0)
+        zeros = torch.zeros((x.size(0), self.density_layer.cell.hidden_size), dtype=x.dtype, device=x.device)
+        # PROBLEMA: la densità iniziale non può essere 0: essendo crescente ed essendo gli input normalizzati sarà sempre < 0!!
+        h = (zeros, zeros, z0)
         z = self.density_layer.forward(x, h)[0]
         if no_batch:
             return z.squeeze(0)

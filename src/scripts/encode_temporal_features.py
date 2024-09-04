@@ -1,18 +1,16 @@
 import os
 from pathlib import Path
-from typing import List, Dict, Any
 
 import lightning as L
 import optuna
 import polars as pl
 import torch
-from fontTools.misc.cython import returns
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch import nn
 from torch import optim
 
-from src.datasets.fcrdatasets import FCRAutoencoderDataModule
+from src.datasets.fcr import AutoencoderDataModule
 from src.models.autoencoder import LitTemporalAutoencoder
 
 if __name__ == '__main__':
@@ -28,7 +26,7 @@ if __name__ == '__main__':
                                                     "result": study.best_value})
 
         L.seed_everything(seed=42)
-        datamodule = FCRAutoencoderDataModule(os.path.join("PGA_LSTM", "Datasets", "FCR_2013_2018_Drivers.csv"), n_timesteps=7, batch_size=64, test_frac=0.05, seed=42)
+        datamodule = AutoencoderDataModule(os.path.join("PGA_LSTM", "Datasets", "FCR_2013_2018_Drivers.csv"), n_timesteps=7, batch_size=64, test_frac=0.05, seed=42)
         datamodule.fcr_valid = datamodule.test_ds
         for i, result in enumerate(results):
             rnn_module = getattr(nn, result["module"])
@@ -82,7 +80,7 @@ if __name__ == '__main__':
             logger=False,
             log_every_n_steps=10
         )
-        datamodule = FCRAutoencoderDataModule(os.path.join("PGA_LSTM", "Datasets", "FCR_2013_2018_Drivers.csv"), n_timesteps=7, batch_size=64, test_frac=0.05, seed=42)
+        datamodule = AutoencoderDataModule(os.path.join("PGA_LSTM", "Datasets", "FCR_2013_2018_Drivers.csv"), n_timesteps=7, batch_size=64, test_frac=0.05, seed=42)
         best_model = LitTemporalAutoencoder.load_from_checkpoint(result["checkpoint_path"], recurrent_module=rnn_module, optimizer_class=optimizer, lr=lr)
         encoded_features = (
             pl.from_numpy(
