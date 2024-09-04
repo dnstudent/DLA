@@ -29,7 +29,7 @@ if __name__ == '__main__':
 
         L.seed_everything(seed=42)
         datamodule = FCRAutoencoderDataModule(os.path.join("PGA_LSTM", "Datasets", "FCR_2013_2018_Drivers.csv"), n_timesteps=7, batch_size=64, test_frac=0.05, seed=42)
-        datamodule.fcr_valid = datamodule.fcr_test
+        datamodule.fcr_valid = datamodule.test_ds
         for i, result in enumerate(results):
             rnn_module = getattr(nn, result["module"])
             optimizer = getattr(optim, result["optimizer_name"])

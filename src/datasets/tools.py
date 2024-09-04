@@ -46,11 +46,12 @@ def periodic_day(date: pl.Expr) -> pl.Expr:
     days_normalized = days_normalized * 2 * np.pi
     return pl.struct(sin_day = days_normalized.sin(), cos_day = days_normalized.cos())
 
-def actual_density(temp):
+def density(temp):
     return 1 - (temp + 288.9414) * (temp - 3.9863) ** 2 / (508929.2 * (temp + 68.12963))
 
-def density(temp):
-    return 1 + actual_density(temp)
+def training_density(temp):
+    """???"""
+    return 1 + density(temp)
 
 def normalize_inputs(x_train, x_test, y_train, y_test):
     x_means, x_stds = x_train.mean(axis=(0,1))[None, None, :], x_train.std(axis=(0,1))[None, None, :]

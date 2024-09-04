@@ -5,6 +5,7 @@ lightning_logs/
 /results
 /examples
 /data
+/notebooks/tests
 fit-perf_logs*.txt
 
 ### macOS template

@@ -10,39 +10,37 @@ from lightning.pytorch.utilities.types import EVAL_DATALOADERS
 from sklearn.model_selection import train_test_split
 from torch.utils.data import TensorDataset, DataLoader
 
+from .common import make_autoencoder_dataset, make_autoencoder_split_dataset, make_autoencoder_split_dataset_old, \
+    make_autoencoder_dataset_old, make_spatiotemporal_dataset, make_spatiotemporal_split_dataset
 from .tools import windowed, periodic_day, density
 from .transformers import scale_wds, StandardScaler
 from .windowed import WindowedDataset
 
 
-def fcr_drivers_table(drivers_csv_path) -> pl.DataFrame:
-    return pl.read_csv(drivers_csv_path, schema_overrides={"time": pl.Date})
+def read_drivers_table(drivers_path) -> pl.DataFrame:
+    return pl.read_csv(drivers_path, schema_overrides={"time": pl.Date}).rename({"time": "date"}).sort("date")
 
-def fcr_autoencoder_dataset(drivers_table: Union[str, pl.DataFrame], window_size: int):
+def autoencoder_dataset_old(drivers_table: Union[str, pl.DataFrame], window_size: int):
     if type(drivers_table) is str:
-        drivers_table = fcr_drivers_table(drivers_table)
-    data = drivers_table.with_columns(periodic_day(pl.col("time")).alias("date_components")).unnest("date_components").sort("time")
-    return windowed(data.drop("time").to_numpy().astype(np.float32), window_size), None, windowed(data["time"].to_numpy(), window_size)
+        drivers_table = read_drivers_table(drivers_table)
+    return make_autoencoder_dataset_old(drivers_table, window_size)
 
-def fcr_autoencoder_split_dataset(drivers_csv_path: str, window_size: int, test_frac: float = 0.05, seed: int = 42) -> Tuple[WindowedDataset, WindowedDataset, WindowedDataset]:
-    x, _, t = fcr_autoencoder_dataset(drivers_csv_path, window_size)
-    windowed_dataset = WindowedDataset(TensorDataset(torch.from_numpy(x)), t)
-    test_size = int(test_frac * len(windowed_dataset))
-    indices = np.arange(len(windowed_dataset))
-    np.random.seed(seed)
-    np.random.shuffle(indices)
-    test_indices = indices[:test_size]
-    train_ds, test_ds = windowed_dataset.train_test_split(test_indices.copy())
-    return train_ds, test_ds, windowed_dataset
+def autoencoder_split_dataset_old(drivers_path: str, window_size: int, test_frac: float = 0.05, seed: Optional[int] = None, shuffle: bool = False) -> Tuple[WindowedDataset, WindowedDataset, WindowedDataset]:
+    x, _, t = autoencoder_dataset(drivers_path, window_size)
+    return make_autoencoder_split_dataset_old(x, t, test_frac, seed, shuffle)
 
-class FCRAutoencoderDataModule(LightningDataModule):
+
+autoencoder_dataset = make_autoencoder_dataset(read_drivers_table)
+autoencoder_split_dataset = make_autoencoder_split_dataset(autoencoder_dataset)
+
+class AutoencoderDataModule(LightningDataModule):
     def __init__(self, drivers_csv_path: str, n_timesteps: int, batch_size: int, test_frac: float = 0.05, seed: int = 42):
         super().__init__()
-        self.drivers_table = fcr_drivers_table(drivers_csv_path)#.with_columns(periodic_day(pl.col("time")).alias("date_components")).unnest("date_components").sort("time")
+        self.drivers_table = read_drivers_table(drivers_csv_path)#.with_columns(periodic_day(pl.col("time")).alias("date_components")).unnest("date_components").sort("time")
         self.batch_size = batch_size
         self.n_timesteps = n_timesteps
         self.test_frac = test_frac
-        self.fcr_train, self.fcr_test, self.fcr_predict = fcr_autoencoder_split_dataset(drivers_csv_path, n_timesteps, test_frac, seed)
+        self.fcr_train, self.fcr_test, self.fcr_predict = autoencoder_split_dataset(drivers_csv_path, n_timesteps, test_frac, seed)
         self.fcr_valid = None
         self.window_scaler = StandardScaler()
         self.window_scaler.fit(self.fcr_train.unique_entries(0))
@@ -78,7 +76,7 @@ class FCRAutoencoderDataModule(LightningDataModule):
         assert self.fcr_predict is not None
         return DataLoader(self.fcr_predict, batch_size=self.batch_size, shuffle=False)
 
-def fcr_full_table(ds_dir, embedded_features_csv_path):
+def full_table(ds_dir, embedded_features_csv_path):
     ds_dir = Path(ds_dir)
     time_features = pl.read_csv(ds_dir / 'FCR_2013_2018_Drivers.csv', schema_overrides={"time": pl.Date}).with_columns(
         periodic_day(pl.col("time")).alias("date_components")
@@ -116,18 +114,22 @@ def fcr_full_table(ds_dir, embedded_features_csv_path):
         all_temperatures
         .join(time_features, on="time", how="inner")
         .filter(pl.col("time") >= pl.date(2013, 5, 21))
-        # .drop("time_right")
         .sort("time", "depth")
+        .rename({"time": "date", "temp_observed": "temp"})
     )
 
-def fcr_spatiotemporal_dataset(ds_dir, embedded_features_csv_path, depth_steps=28):
-    table = fcr_full_table(ds_dir, embedded_features_csv_path)
+def spatiotemporal_dataset_old(ds_dir, embedded_features_csv_path, depth_steps=28):
+    table = full_table(ds_dir, embedded_features_csv_path)
     table = table.filter(pl.col("temp_observed").is_not_null()).sort("time", "depth").drop("time")
     return (
         table.drop(["temp_observed"]).to_numpy().astype(np.float32).reshape((-1, depth_steps, len(table.columns) - 1)),
         table.select(["temp_observed"]).with_columns(density(pl.col("temp_observed")).alias("density")).select(["temp_observed", "density"]).to_numpy().astype(np.float32).reshape((-1, depth_steps, 2))
     )
 
-def fcr_spatiotemporal_split_dataset(ds_dir, embedded_features_csv_path, test_size, depth_steps=28, seed=42, shuffle=False):
-    X, y = fcr_spatiotemporal_dataset(ds_dir, embedded_features_csv_path, depth_steps)
+def spatiotemporal_split_dataset_old(ds_dir, embedded_features_csv_path, test_size, depth_steps=28, seed=42, shuffle=False):
+    X, y = spatiotemporal_dataset(ds_dir, embedded_features_csv_path, depth_steps)
     return train_test_split(X, y, test_size=test_size, random_state=seed if shuffle else None, shuffle=shuffle)
+
+spatiotemporal_dataset = make_spatiotemporal_dataset(full_table, depth_steps=28)
+spatiotemporal_split_dataset = make_spatiotemporal_split_dataset(spatiotemporal_dataset, depth_steps=28)
+

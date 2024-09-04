@@ -34,7 +34,7 @@ class PGADensityCell(jit.ScriptModule):
         weights_init_fn(self.weight_zh)
 
     def init_recurrent_biases(self):
-        nn.init.uniform_(self.bias_h)
+        nn.init.zeros_(self.bias_h)
         # Inizializzo il forget gate a 1. Sembra che sia preferibile
         nn.init.ones_(self.bias_h[self.hidden_size:2*self.hidden_size])
 
@@ -42,7 +42,7 @@ class PGADensityCell(jit.ScriptModule):
         def weights_init(m):
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
-                nn.init.uniform_(m.bias)
+                nn.init.zeros_(m.bias)
         self.delta_net.apply(weights_init)
 
     @jit.script_method
@@ -86,11 +86,11 @@ class PGADensityLSTM(jit.ScriptModule):
         self.density_layer = PGADensityLayer(input_size, hidden_size, forward_size, dropout_rate)
 
     @jit.script_method
-    def forward(self, x: Tensor, h: Optional[Tuple[Tensor, Tensor, Tensor]] = None) -> Tensor:
-        if h is None:
+    def forward(self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]) -> Tensor:
+        if h[0] is None:
             zeros = torch.zeros((x.size(0), self.density_layer.cell.hidden_size), dtype=x.dtype, device=x.device)
             # PROBLEMA: la densità iniziale non può essere 0: essendo crescente ed essendo gli input normalizzati sarà sempre < 0!!
-            h = (zeros, zeros, torch.full((x.size(0), 1), 0, dtype=x.dtype, device=x.device))
+            h = (zeros, zeros, h[2])
         no_batch = x.ndim == 2
         if no_batch:
             x = x.unsqueeze(0)
