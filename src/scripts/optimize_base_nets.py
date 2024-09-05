@@ -16,17 +16,18 @@ from torch.utils import data as tdata
 from src.datasets.fcr import spatiotemporal_split_dataset
 from src.datasets.tools import normalize_inputs
 from src.models import lstm
+from src.models.callbacks import BestScore
 
 
 def define_hparams(trial: optuna.Trial, physics_penalty, ttoz_penalty):
     apply_decay = trial.suggest_int("apply_decay", 0, 1)
     if apply_decay == 1:
-        weight_decay = trial.suggest_float("weight_decay", 1e-7, 1e-3, log=True)
+        weight_decay = trial.suggest_float("weight_decay", 1e-7, 1e-2, log=True)
     else:
         weight_decay = 0
-    initial_lr = trial.suggest_float("initial_lr", 5e-4, 1e-1, log=True)
+    initial_lr = trial.suggest_float("initial_lr", 1e-5, 1e-1, log=True)
     lr_decay_rate = trial.suggest_float("lr_decay_rate", 0.1, 1, log=True)
-    density_lambda = trial.suggest_float("density_lambda", 1e-1, 1e1, log=True)
+    density_lambda = trial.suggest_float("density_lambda", 1e-2, 1e2, log=True)
     hparams = {
         "weight_decay": weight_decay,
         "initial_lr": initial_lr,
@@ -34,10 +35,10 @@ def define_hparams(trial: optuna.Trial, physics_penalty, ttoz_penalty):
         "density_lambda": density_lambda,
     }
     if physics_penalty:
-        physics_penalty_lambda = trial.suggest_float("physics_penalty_lambda", 1e-2, 1e1, log=True)
+        physics_penalty_lambda = trial.suggest_float("physics_penalty_lambda", 1e-2, 1e2, log=True)
         hparams |= {"physics_penalty_lambda": physics_penalty_lambda}
     if ttoz_penalty:
-        ttoz_penalty_lambda = trial.suggest_float("ttoz_penalty_lambda", 1e-2, 1e1, log=True)
+        ttoz_penalty_lambda = trial.suggest_float("ttoz_penalty_lambda", 1e-2, 1e2, log=True)
         hparams |= {"ttoz_penalty_lambda": ttoz_penalty_lambda}
     return hparams
 
@@ -56,7 +57,7 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
     physics_penalty = "PGLLSTM" in model_name
     ttoz_penalty = model_name in ["MyPGALSTMLoss", "MyPGALSTMComb"]
     def _fn(trial: optuna.Trial):
-        cv = KFold(n_splits=3, shuffle=True, random_state=seed)
+        cv = KFold(n_splits=4, shuffle=False, random_state=None)
         nrmse_scores = []
         hparams = define_hparams(trial, physics_penalty, ttoz_penalty)
         for i, (train_idxs, val_idxs) in track(enumerate(cv.split(x, y)), total=cv.n_splits, auto_refresh=False, transient=True, description=f"Trial {trial.number}"):
@@ -69,6 +70,7 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
             train_ds = tdata.TensorDataset(torch.from_numpy(x_train), torch.from_numpy(w_train), torch.from_numpy(y_train))
             val_ds = tdata.TensorDataset(torch.from_numpy(x_val), torch.from_numpy(w_val), torch.from_numpy(y_val))
 
+            best_score_logger = BestScore(monitor="valid/score/t", mode="max")
             trainer = L.Trainer(
                 max_epochs=max_epochs,
                 enable_checkpointing=False,
@@ -76,7 +78,8 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
                 devices=n_devices,
                 enable_progress_bar=False,
                 callbacks=[
-                    EarlyStopping(monitor="valid/score/t", patience=patience, mode="max")
+                    EarlyStopping(monitor="valid/score/t", patience=patience, mode="max"),
+                    best_score_logger
                 ],
                 logger=TensorBoardLogger(name=f'trial_{trial.number}', save_dir=os.path.join(work_dir, "logs"), version=f"fold_{i+1}") if log and i == 0 else False,
                 log_every_n_steps=4,
@@ -91,8 +94,8 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
             )
             # if trainer.logger:
             #     trainer.logger.log_hyperparams(params=hparams, metrics=trainer.callback_metrics)
-            nrmse_scores.append(trainer.callback_metrics["valid/score/t"].item())
-            trial.report(trainer.callback_metrics["valid/score/t"].item(), i)
+            nrmse_scores.append(best_score_logger.best_score)
+            trial.report(best_score_logger.best_score, i)
             if trial.should_prune():
                 raise optuna.TrialPruned()
         nrmse_score = np.mean(nrmse_scores)
@@ -210,6 +213,6 @@ if __name__ == '__main__':
     # embedding_version = args.embedding_version if args.embedding_version is not None else "latest"
 
     study.optimize(
-        objective(args.model_name, args.accelerator, args.max_epochs, args.patience, args.ds_dir, args.embedding_dir, workdir, args.n_devices, args.profile, args.log, 0.6, False, 42, args.embedding_version),
+        objective(args.model_name, args.accelerator, args.max_epochs, args.patience, args.ds_dir, args.embedding_dir, workdir, args.n_devices, args.profile, args.log, 0.2, False, 42, args.embedding_version),
         n_trials=args.n_trials
     )

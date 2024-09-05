@@ -8,7 +8,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 
-class PGADensityCell(jit.ScriptModule):
+class MonotonicLSTMCell(jit.ScriptModule):
     def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float):
         super().__init__()
         self.input_size = input_size
@@ -64,10 +64,10 @@ class PGADensityCell(jit.ScriptModule):
         zt = zp + dt
         return zt, (ht, ct, zt)
 
-class PGADensityLayer(jit.ScriptModule):
+class MonotonicLSTMLayer(jit.ScriptModule):
     def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float):
         super().__init__()
-        self.cell = PGADensityCell(input_size, hidden_size, forward_size, dropout_rate)
+        self.cell = MonotonicLSTMCell(input_size, hidden_size, forward_size, dropout_rate)
 
     @jit.script_method
     def forward(self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
@@ -78,21 +78,19 @@ class PGADensityLayer(jit.ScriptModule):
             outputs += [output]
         return torch.stack(outputs, dim=1), h
 
-class PGADensityLSTM(jit.ScriptModule):
+class MonotonicLSTM(jit.ScriptModule):
     def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float):
         super().__init__()
-        self.density_layer = PGADensityLayer(input_size, hidden_size, forward_size, dropout_rate)
+        self.monotonic_layer = MonotonicLSTMLayer(input_size, hidden_size, forward_size, dropout_rate)
 
     @jit.script_method
-    def forward(self, x: Tensor, z0: Tensor) -> Tensor:
+    def forward(self, x: Tensor, h0: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
         no_batch = x.ndim == 2
         if no_batch:
             x = x.unsqueeze(0)
-        zeros = torch.zeros((x.size(0), self.density_layer.cell.hidden_size), dtype=x.dtype, device=x.device)
         # PROBLEMA: la densità iniziale non può essere 0: essendo crescente ed essendo gli input normalizzati sarà sempre < 0!!
-        h = (zeros, zeros, z0)
-        z = self.density_layer.forward(x, h)[0]
+        z, h = self.monotonic_layer(x, h0)
         if no_batch:
-            return z.squeeze(0)
-        return z
+            return z.squeeze(0), h
+        return z, h
 
