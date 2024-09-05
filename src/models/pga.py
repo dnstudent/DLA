@@ -88,7 +88,6 @@ class MonotonicLSTM(jit.ScriptModule):
         no_batch = x.ndim == 2
         if no_batch:
             x = x.unsqueeze(0)
-        # PROBLEMA: la densità iniziale non può essere 0: essendo crescente ed essendo gli input normalizzati sarà sempre < 0!!
         z, h = self.monotonic_layer(x, h0)
         if no_batch:
             return z.squeeze(0), h

@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from typing import Optional, Tuple
 
 import torch
@@ -6,7 +7,17 @@ from torch import nn, Tensor
 from models.pga import MonotonicLSTM
 
 
-class LSTMDensityRegressor(nn.Module):
+class DensityRegressor(ABC):
+    @abstractmethod
+    def forward(self, x: Tensor, z0: Optional[Tensor]) -> Tensor:
+        pass
+
+class DensityRegressorV2(ABC):
+    @abstractmethod
+    def forward(self, x: Tensor, h0: Tuple[Tensor, Tensor], z0: Tensor) -> Tensor:
+        pass
+
+class LSTMDensityRegressor(DensityRegressor, nn.Module):
     """Network estimating densities from features. Expects `Xd` as input. Output has size 1
     """
     def __init__(self, n_features, hidden_size, forward_size, dropout_rate):
@@ -23,12 +34,12 @@ class LSTMDensityRegressor(nn.Module):
             nn.Linear(forward_size, 1)
         )
 
-    def forward(self, w: Tensor, z0: Optional[Tensor]) -> Tensor:
-        w, _ = self.lstm(w)
-        return self.dense_layers(w)
+    def forward(self, x: Tensor, z0: Optional[Tensor]) -> Tensor:
+        x, _ = self.lstm(x)
+        return self.dense_layers(x)
 
 
-class LSTMDensityRegressorV2(nn.Module):
+class LSTMDensityRegressorV2(DensityRegressorV2, nn.Module):
     def __init__(self, n_depth_features, hidden_size, forward_size, dropout_rate):
         super().__init__()
         self.lstm = nn.LSTM(n_depth_features, hidden_size, batch_first=True)
@@ -48,8 +59,8 @@ class LSTMDensityRegressorV2(nn.Module):
         return self.dense_layers(d)
 
 
-class MonotonicDensityRegressor(nn.Module):
-    def __init__(self, n_input_features, hidden_size, forward_size, dropout_rate):
+class MonotonicDensityRegressor(DensityRegressor, nn.Module):
+    def __init__(self, n_input_features: int, hidden_size: int, forward_size: int, dropout_rate: float):
         super().__init__()
         self.net = MonotonicLSTM(n_input_features, hidden_size, forward_size, dropout_rate)
 
@@ -59,10 +70,10 @@ class MonotonicDensityRegressor(nn.Module):
         return self.net(w, h0)[0]
 
 
-class MonotonicDensityRegressorV2(nn.Module):
+class MonotonicDensityRegressorV2(DensityRegressorV2, nn.Module):
     def __init__(self, n_depth_features, hidden_size, forward_size, dropout_rate):
         super().__init__()
         self.net = MonotonicLSTM(n_depth_features, hidden_size, forward_size, dropout_rate)
 
-    def forward(self, d, h0, z0) -> Tensor:
+    def forward(self, d: Tensor, h0: Tuple[Tensor, Tensor], z0: Tensor) -> Tensor:
         return self.net(d, h0 + (z0,))[0]

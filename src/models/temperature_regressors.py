@@ -1,16 +1,21 @@
 from typing import Tuple
 
+import torch
 from torch import nn, Tensor
 
 
-class TemperatureRegressor(nn.Sequential):
+class TemperatureRegressor(nn.Module):
     def __init__(self, n_input_features, forward_size, dropout_rate):
-        super().__init__(
+        super().__init__()
+        self.net = nn.Sequential(
             nn.Linear(n_input_features + 1, forward_size),
             nn.Dropout(dropout_rate),
             nn.ELU(alpha=1.0),
             nn.Linear(forward_size, 1)
         )
+
+    def forward(self, x: Tensor, z: Tensor) -> Tensor:
+        return self.net(torch.cat((x, z), dim=-1))
 
 class TemperatureRegressorV2(nn.Module):
     def __init__(self, n_wembed_features, dropout_rate):
