@@ -86,10 +86,21 @@ class MonotonicLSTM(jit.ScriptModule):
     @jit.script_method
     def forward(self, x: Tensor, h0: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
         no_batch = x.ndim == 2
+        h0, c0, z0 = h0
         if no_batch:
             x = x.unsqueeze(0)
-        z, h = self.monotonic_layer(x, h0)
+            h0 = h0.unsqueeze(1)
+            c0 = c0.unsqueeze(1)
+            z0 = z0.unsqueeze(1)
+        h0 = h0.squeeze(0)
+        c0 = c0.squeeze(0)
+        z0 = z0.squeeze(0)
+        z, h = self.monotonic_layer(x, (h0, c0, z0))
         if no_batch:
             return z.squeeze(0), h
+        h, c, zt = h
+        h = h.unsqueeze(0)
+        c = c.unsqueeze(0)
+        zt = zt.unsqueeze(0)
+        h = (h, c, zt)
         return z, h
-

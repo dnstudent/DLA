@@ -62,11 +62,33 @@ def make_spatiotemporal_dataset(full_table_loader, drivers_reader, depth_steps, 
         )
     return _fn
 
-def make_spatiotemporal_split_dataset_old(spatiotemporal_dataset_maker):
-    def _fn(ds_dir, drivers_path, embedded_features_csv_path, test_size, seed=42, shuffle=False):
-        x, _, y, _ = spatiotemporal_dataset_maker(ds_dir, drivers_path, embedded_features_csv_path)
-        x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=test_size, random_state=seed if shuffle else None, shuffle=shuffle)
-        return x_train, x_test, y_train, y_test
+def make_spatiotemporal_dataset_v2(full_table_loader, drivers_reader, depth_steps, time_steps):
+    def _fn(ds_dir, drivers_path, embedded_features_csv_path):
+        table = full_table_loader(ds_dir, embedded_features_csv_path)
+        table = table.filter(pl.col("temp").is_not_null()).sort("date", "depth")
+        drivers = (
+            drivers_reader(drivers_path)
+            .with_columns(date_components=periodic_day(pl.col("date")))
+            .unnest("date_components")
+            .select("date", features=pl.struct(cs.all()))
+            .group_by_dynamic(index_column="date", period="7d", every="1d", include_boundaries=False, label="right", closed="right")
+            .agg(pl.col("features"), n=pl.len())
+            .filter(pl.col("n") == time_steps)
+            .drop("n")
+            .join(table, on="date", how="semi")
+            .sort("date")
+        )
+        table = table.join(drivers, on="date", how="semi")
+        return (
+            # d
+            table.select("depth", "glm_temp").to_numpy().astype(np.float32).reshape((-1, depth_steps, 2)),
+            # w
+            drivers.drop("date").explode("features").unnest("features").drop("date").to_numpy().astype(np.float32).reshape((len(drivers), time_steps, -1)),
+            # y
+            table.select(["temp"]).with_columns(density(pl.col("temp")).alias("density")).select(["temp", "density"]).to_numpy().astype(np.float32).reshape((-1, depth_steps, 2)),
+            # t
+            drivers["date"].to_numpy()
+        )
     return _fn
 
 def make_spatiotemporal_split_dataset_pedantic(spatiotemporal_dataset_maker):

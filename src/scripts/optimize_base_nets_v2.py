@@ -14,9 +14,9 @@ from rich.progress import track
 from sklearn.model_selection import KFold
 from torch.utils import data as tdata
 
-from src.datasets.fcr import spatiotemporal_split_dataset
+from src.datasets.fcr import spatiotemporal_split_dataset_v2
 from src.datasets.tools import normalize_inputs
-from src.models import lstm
+from src.models import lstm_v2
 from src.models.callbacks import BestScore
 
 
@@ -50,11 +50,11 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
     else:
         embedding_path = None
     drivers_dir = os.path.join(ds_dir, "FCR_2013_2018_Drivers.csv")
-    x, x_test, w, w_test, y, y_test, _, t_test = spatiotemporal_split_dataset(ds_dir, drivers_dir, embedding_path, test_size)
+    x, x_test, w, w_test, y, y_test, _, t_test = spatiotemporal_split_dataset_v2(ds_dir, drivers_dir, embedding_path, test_size)
     n_input_features = x.shape[-1]
     n_initial_features = w.shape[-1]
     multiproc = n_devices > 1
-    model_class = getattr(lstm, model_name)
+    model_class = getattr(lstm_v2, model_name)
     physics_penalty = "PGL" in model_name
     ttoz_penalty = "TtoZ" in model_name
     def _fn(trial: optuna.Trial):
@@ -78,7 +78,7 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
                 devices=n_devices,
                 enable_progress_bar=False,
                 callbacks=[
-                    EarlyStopping(monitor="valid/score/sum", patience=patience, mode="max"),
+                    EarlyStopping(monitor="valid/score/t", patience=patience, mode="max"),
                     best_score_logger
                 ],
                 logger=TensorBoardLogger(name=f'trial_{trial.number}', save_dir=os.path.join(work_dir, "logs"), version=f"fold_{i+1}") if log and i == 0 else False,

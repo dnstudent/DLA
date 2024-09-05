@@ -112,7 +112,7 @@ class AvgInitializerV2(nn.Module):
 class LSTMZ0Initializer(nn.Module):
     def __init__(self, n_weather_features: int, hidden_size: int, dropout_rate: float):
         super().__init__()
-        self.recurrent = nn.LSTM(n_weather_features, hidden_size, 1, batch_first=True)
+        self.recurrent = nn.LSTM(n_weather_features, hidden_size, batch_first=True)
         self.output_layer = nn.Sequential(nn.Dropout(dropout_rate), nn.ReLU(), nn.Linear(hidden_size, 1))
 
     def forward(self, w):
@@ -123,9 +123,20 @@ class LSTMZ0Initializer(nn.Module):
 class LSTMZ0InitializerV2(nn.Module):
     def __init__(self, n_weather_features: int, hidden_size: int, dropout_rate: float):
         super().__init__()
-        self.recurrent = nn.LSTM(n_weather_features, hidden_size, 1, batch_first=True)
+        self.recurrent = nn.LSTM(n_weather_features, hidden_size, batch_first=True)
         self.output_layer = nn.Sequential(nn.Dropout(dropout_rate), nn.ReLU(), nn.Linear(hidden_size, 1))
 
     def forward(self, w):
         w, h = self.recurrent(w)
-        return self.output_layer(w[:, -1, :]), h
+        z0 = self.output_layer(w[:, -1, :])
+        return z0, h
+
+class LSTMNoZInitializerV2(nn.Module):
+    def __init__(self, n_weather_features: int, hidden_size: int, dropout_rate: float):
+        super().__init__()
+        self.recurrent = nn.LSTM(n_weather_features, hidden_size, batch_first=True)
+
+    def forward(self, w):
+        _, h = self.recurrent(w)
+        return None, h
+

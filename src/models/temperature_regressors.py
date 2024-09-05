@@ -25,4 +25,4 @@ class TemperatureRegressorV2(nn.Module):
 
     def forward(self, d: Tensor, h0: Tuple[Tensor, Tensor]):
         d, _ = self.recurrent(d, h0)
-        return self.output_layer(d[:, -1, :])
+        return self.output_layer(d)

@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn, Tensor
 
-from models.pga import MonotonicLSTM
+from .pga import MonotonicLSTM
 
 
 class DensityRegressor(ABC):
@@ -14,7 +14,7 @@ class DensityRegressor(ABC):
 
 class DensityRegressorV2(ABC):
     @abstractmethod
-    def forward(self, x: Tensor, h0: Tuple[Tensor, Tensor], z0: Tensor) -> Tensor:
+    def forward(self, x: Tensor, h0: Tuple[Tensor, Tensor], z0: Optional[Tensor]) -> Tensor:
         pass
 
 class LSTMDensityRegressor(DensityRegressor, nn.Module):
@@ -38,7 +38,6 @@ class LSTMDensityRegressor(DensityRegressor, nn.Module):
         x, _ = self.lstm(x)
         return self.dense_layers(x)
 
-
 class LSTMDensityRegressorV2(DensityRegressorV2, nn.Module):
     def __init__(self, n_depth_features, hidden_size, forward_size, dropout_rate):
         super().__init__()
@@ -54,8 +53,8 @@ class LSTMDensityRegressorV2(DensityRegressorV2, nn.Module):
             nn.Linear(forward_size, 1)
         )
 
-    def forward(self, d: Tensor, h0: Tuple[Tensor, Tensor], z0: Tensor) -> Tensor:
-        d, _ = self.lstm(d, h0 + (z0,))
+    def forward(self, d: Tensor, h0: Tuple[Tensor, Tensor], z0: Optional[Tensor]) -> Tensor:
+        d, _ = self.lstm(d, h0)
         return self.dense_layers(d)
 
 

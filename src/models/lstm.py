@@ -43,16 +43,17 @@ class LitTZRegressor(L.LightningModule):
         self.n_initial_features = n_initial_features
 
     def compute_losses(self, t_hat, z_hat, y):
-        t_loss = mse_loss(t_hat, y[..., 0])
-        z_loss = mse_loss(z_hat, y[..., 1])
+        t_loss = mse_loss(t_hat.squeeze(-1), y[..., 0])
+        z_loss = mse_loss(z_hat.squeeze(-1), y[..., 1])
         return {"total": t_loss + self.density_lambda*z_loss, "t": t_loss, "z": z_loss}
 
     @staticmethod
     def compute_scores(t_hat, z_hat, y):
-        t_score = -mean_squared_error(t_hat, y[..., 0], squared=False)
+        z_hat = z_hat.squeeze(-1)
+        t_score = -mean_squared_error(t_hat.squeeze(-1), y[..., 0], squared=False)
         z_score = -mean_squared_error(z_hat, y[..., 1], squared=False)
         physics_score = physical_consistency(z_hat, tol=1e-2, axis=1, agg_dims=(0,1)) # tol=1e-2 is approximately 1e-5 kg/m3, as the std is in the order of 1e-3
-        return {"t": t_score, "z": z_score, "monotonicity": physics_score}
+        return {"t": t_score, "z": z_score, "monotonicity": physics_score, "sum": t_score + z_score}
 
     def forward(self, x, w, **kwargs):
         w = self.dropout(w)
@@ -105,7 +106,7 @@ class LitPGL(LitTZRegressor):
 
     def compute_losses(self, t_hat, z_hat, y):
         normal_losses = super().compute_losses(t_hat, z_hat, y)
-        monotonicity_physics_loss = physical_inconsistency(z_hat, tol=1e-2, axis=1, agg_dims=(0,1))
+        monotonicity_physics_loss = physical_inconsistency(z_hat.squeeze(-1), tol=1e-2, axis=1, agg_dims=(0,1))
         normal_losses["monotonicity"] = monotonicity_physics_loss
         normal_losses["total"] += self.physics_penalty_lambda * normal_losses["monotonicity"]
         return normal_losses
@@ -172,7 +173,7 @@ class PGATtoZLoss(LitPGA):
                  **kwargs
                  ):
         if not initializer:
-            initializer = FullInitializer(0.0)
+            initializer = AvgInitializer(n_initial_features, forward_size, dropout_rate)
         super().__init__(initializer, n_input_features, n_initial_features, initial_lr, lr_decay_rate, weight_decay, hidden_size, forward_size, density_lambda, dropout_rate, multiproc)
         self.ttoz_penalty_lambda = ttoz_penalty_lambda
         self.t_mean = t_mean
@@ -183,31 +184,7 @@ class PGATtoZLoss(LitPGA):
 
     def compute_losses(self, t_hat, z_hat, y):
         normal_losses = super().compute_losses(t_hat, z_hat, y)
-        ttoz_physics_loss = reverse_tz_loss(t_hat, z_hat, self.z_mean, self.z_std, self.t_mean, self.t_std)
+        ttoz_physics_loss = reverse_tz_loss(t_hat.squeeze(-1), z_hat.squeeze(-1), self.z_mean, self.z_std, self.t_mean, self.t_std)
         normal_losses["ttoz"] = ttoz_physics_loss
         normal_losses["total"] += self.ttoz_penalty_lambda * ttoz_physics_loss
         return normal_losses
-
-class PGACombo(PGATtoZLoss):
-    """PGA con loss extra
-    """
-    def __init__(self,
-                 z_mean: Tensor, z_std: Tensor,
-                 t_mean: Tensor, t_std: Tensor,
-                 n_input_features: int,
-                 n_initial_features: Optional[int],
-                 initial_lr: float,
-                 lr_decay_rate: float,
-                 ttoz_penalty_lambda: float,
-                 weight_decay: float,
-                 density_lambda: float,
-                 dropout_rate: float,
-                 multiproc: bool,
-                 initializer: Optional[nn.Module] = None,
-                 hidden_size: int=8,
-                 forward_size: int=5,
-                 **kwargs
-                 ):
-        if not initializer:
-            initializer = AvgInitializer(n_initial_features, forward_size, dropout_rate)
-        super().__init__(z_mean, z_std, t_mean, t_std, n_input_features, n_initial_features, initial_lr, lr_decay_rate, ttoz_penalty_lambda, weight_decay, density_lambda, dropout_rate, multiproc, initializer, hidden_size, forward_size)
