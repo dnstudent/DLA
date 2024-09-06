@@ -26,3 +26,20 @@ class TemperatureRegressorV2(nn.Module):
     def forward(self, d: Tensor, h0: Tuple[Tensor, Tensor]):
         d, _ = self.recurrent(d, h0)
         return self.output_layer(d)
+
+
+class CustomTV2(nn.Module):
+    def __init__(self, hidden_size, dropout_rate):
+        super().__init__()
+        self.drnn = nn.GRU(input_size=1, hidden_size=hidden_size, batch_first=True)
+        if hidden_size > 2:
+            self.adapter = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.Dropout(dropout_rate), nn.ReLU())
+        else:
+            self.adapter = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.ReLU())
+        self.out = nn.Linear(hidden_size, 1)
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, d: Tensor, h0: Tuple[Tensor, Tensor]):
+        d = self.drnn(d, self.adapter(h0[0]))[0]
+        d = self.out(torch.square(d))
+        return d

@@ -26,7 +26,8 @@ class MonotonicLSTMCell(jit.ScriptModule):
                 nn.ReLU()
             ])
             in_size = forward_size
-        self.delta_net = nn.Sequential(*modules, nn.Linear(in_size, 1), nn.ReLU())
+        self.delta_net = nn.Sequential(*modules, nn.Linear(in_size, 1))
+        self.relu = nn.ReLU()
         self.init_recurrent_weights()
         self.init_recurrent_biases()
         self.init_sequential_params()
@@ -65,7 +66,7 @@ class MonotonicLSTMCell(jit.ScriptModule):
         Ot = F.hardsigmoid(Ot)
         ht = Ot * torch.tanh(ct)
         # Monotonicity-preserving step
-        dt = self.delta_net(ht)
+        dt = self.relu(self.delta_net(ht))
         zt = zp + dt
         return zt, (ht, ct, zt)
 

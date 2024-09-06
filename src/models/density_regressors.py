@@ -73,6 +73,15 @@ class MonotonicDensityRegressorV2(DensityRegressorV2, nn.Module):
     def __init__(self, n_depth_features, hidden_size, forward_size, dropout_rate, n_delta_layers: int = 3):
         super().__init__()
         self.net = MonotonicLSTM(n_depth_features, hidden_size, forward_size, dropout_rate, n_delta_layers)
+        if hidden_size > 2:
+            self.hadapter = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.Dropout(dropout_rate), nn.ReLU())
+            self.cadapter = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.Dropout(dropout_rate), nn.ReLU())
+        else:
+            self.hadapter = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.ReLU())
+            self.cadapter = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.ReLU())
 
     def forward(self, d: Tensor, h0: Tuple[Tensor, Tensor], z0: Tensor) -> Tensor:
-        return self.net(d, h0 + (z0,))[0]
+        h0, c0 = h0
+        h0 = self.hadapter(h0)
+        c0 = self.cadapter(c0)
+        return self.net(d, (h0, c0, z0))[0]
