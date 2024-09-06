@@ -144,3 +144,10 @@ class PGAZ0RNNV2(LitTZRegressorV2):
         temperature_regressor = TemperatureRegressorV2(weather_embedding_size, dropout_rate)
         super().__init__(weather_processor, density_regressor, temperature_regressor, n_depth_features, n_weather_features, initial_lr, lr_decay_rate, weight_decay, density_lambda, dropout_rate, multiproc)
         self.save_hyperparameters(ignore=["weather_processor", "density_regressor", "temperature_regressor"])
+
+    @override
+    def configure_optimizers(self) -> OptimizerLRScheduler:
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.initial_lr, weight_decay=self.weight_decay)
+        lr_scheduler = ReduceLROnPlateau(optimizer, factor=self.lr_decay_rate, patience=100, min_lr=8e-6,
+                                         threshold=-1e-3, threshold_mode="abs", cooldown=50)
+        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "train/loss/total"}

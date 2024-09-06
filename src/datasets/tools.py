@@ -65,7 +65,7 @@ def normalize_inputs(train_arrs, test_arrs):
         [(train_arr - var_mean) / var_std for train_arr, var_mean, var_std in zip(train_arrs, var_means, var_stds)],
         [(test_arr - var_mean) / var_std for test_arr, var_mean, var_std in zip(test_arrs, var_means, var_stds)],
         var_means,
-        var_stds,
+        var_stds
     )
 
 

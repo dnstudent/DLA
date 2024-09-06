@@ -123,7 +123,7 @@ class LSTMZ0Initializer(nn.Module):
 class LSTMZ0InitializerV2(nn.Module):
     def __init__(self, n_weather_features: int, hidden_size: int, dropout_rate: float):
         super().__init__()
-        self.recurrent = nn.LSTM(n_weather_features, hidden_size, batch_first=True)
+        self.recurrent = nn.GRU(n_weather_features, hidden_size, batch_first=True)
         self.output_layer = nn.Sequential(nn.Dropout(dropout_rate), nn.ReLU(), nn.Linear(hidden_size, 1))
 
     def forward(self, w):

@@ -51,8 +51,8 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
         embedding_path = None
     drivers_dir = os.path.join(ds_dir, "FCR_2013_2018_Drivers.csv")
     x, x_test, w, w_test, y, y_test, _, t_test = spatiotemporal_split_dataset_v2(ds_dir, drivers_dir, embedding_path, test_size)
-    n_input_features = x.shape[-1]
-    n_initial_features = w.shape[-1]
+    n_depth_features = x.shape[-1]
+    n_weather_features = w.shape[-1]
     multiproc = n_devices > 1
     model_class = getattr(lstm_v2, model_name)
     physics_penalty = "PGL" in model_name
@@ -85,7 +85,7 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
                 log_every_n_steps=4,
                 profiler=SimpleProfiler(dirpath=work_dir, filename="perf_logs") if profile else None,
             )
-            model = model_class(n_input_features=n_input_features, **hparams, multiproc=multiproc, n_initial_features=n_initial_features, z_mean=pz_means, z_std=pz_stds, t_mean=pt_means, t_std=pt_stds, dropout_rate=0.2)
+            model = model_class(n_depth_features=n_depth_features, **hparams, multiproc=multiproc, n_weather_features=n_weather_features, z_mean=pz_means, z_std=pz_stds, t_mean=pt_means, t_std=pt_stds, dropout_rate=0.2)
 
             trainer.fit(
                 model,
@@ -133,7 +133,7 @@ def add_program_arguments(parser):
         "--max_epochs",
         action="store",
         type=int,
-        default=6000,
+        default=50000,
         help="Number of epochs to run"
     )
     parser.add_argument(

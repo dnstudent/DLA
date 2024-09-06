@@ -9,7 +9,7 @@ from torch.nn.parameter import Parameter
 
 
 class MonotonicLSTMCell(jit.ScriptModule):
-    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float):
+    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, n_delta_layers: int):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -17,11 +17,16 @@ class MonotonicLSTMCell(jit.ScriptModule):
         self.weight_hh = Parameter(torch.empty(4 * hidden_size, hidden_size))
         self.weight_zh = Parameter(torch.empty(4 * hidden_size, 1))
         self.bias_h = Parameter(torch.empty(4 * hidden_size))
-        self.delta_net = nn.Sequential(
-            nn.Linear(hidden_size, forward_size), nn.Dropout(dropout_rate), nn.ReLU(),
-            nn.Linear(forward_size, forward_size), nn.Dropout(dropout_rate), nn.ReLU(),
-            nn.Linear(forward_size, 1), nn.ReLU()
-        )
+        modules = []
+        in_size = hidden_size
+        for _ in range(n_delta_layers-1):
+            modules.extend([
+                nn.Linear(in_size, forward_size),
+                nn.Dropout(dropout_rate),
+                nn.ReLU()
+            ])
+            in_size = forward_size
+        self.delta_net = nn.Sequential(*modules, nn.Linear(in_size, 1), nn.ReLU())
         self.init_recurrent_weights()
         self.init_recurrent_biases()
         self.init_sequential_params()
@@ -65,9 +70,9 @@ class MonotonicLSTMCell(jit.ScriptModule):
         return zt, (ht, ct, zt)
 
 class MonotonicLSTMLayer(jit.ScriptModule):
-    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float):
+    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, n_delta_layers: int):
         super().__init__()
-        self.cell = MonotonicLSTMCell(input_size, hidden_size, forward_size, dropout_rate)
+        self.cell = MonotonicLSTMCell(input_size, hidden_size, forward_size, dropout_rate, n_delta_layers)
 
     @jit.script_method
     def forward(self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
@@ -79,9 +84,9 @@ class MonotonicLSTMLayer(jit.ScriptModule):
         return torch.stack(outputs, dim=1), h
 
 class MonotonicLSTM(jit.ScriptModule):
-    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float):
+    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, n_delta_layers: int):
         super().__init__()
-        self.monotonic_layer = MonotonicLSTMLayer(input_size, hidden_size, forward_size, dropout_rate)
+        self.monotonic_layer = MonotonicLSTMLayer(input_size, hidden_size, forward_size, dropout_rate, n_delta_layers)
 
     @jit.script_method
     def forward(self, x: Tensor, h0: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
