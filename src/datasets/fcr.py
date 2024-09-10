@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 
 from .common import make_autoencoder_dataset, make_autoencoder_split_dataset, make_spatiotemporal_dataset, \
     make_spatiotemporal_split_dataset, make_spatiotemporal_dataset_v2
-from .tools import periodic_day
+from .tools import periodic_day, density
 from .transformers import scale_wds, StandardScaler
 
 
@@ -104,7 +104,8 @@ def full_table(ds_dir, embedded_features_csv_path):
     )
 
 spatiotemporal_dataset = make_spatiotemporal_dataset(full_table, read_drivers_table, depth_steps=28, time_steps=7)
-spatiotemporal_split_dataset = make_spatiotemporal_split_dataset(spatiotemporal_dataset)
+spatiotemporal_split_dataset = make_spatiotemporal_split_dataset(spatiotemporal_dataset, split=189)
+
 
 spatiotemporal_dataset_v2 = make_spatiotemporal_dataset_v2(full_table, read_drivers_table, depth_steps=28, time_steps=7)
-spatiotemporal_split_dataset_v2 = make_spatiotemporal_split_dataset(spatiotemporal_dataset_v2)
+spatiotemporal_split_dataset_v2 = make_spatiotemporal_split_dataset(spatiotemporal_dataset_v2, split=189)

@@ -4,7 +4,6 @@ import lightning as L
 import torch
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 
-
 class MCSampler(L.LightningModule):
     def __init__(self, model, sample_size):
         super().__init__()
@@ -23,7 +22,7 @@ class MCSampler(L.LightningModule):
 
     def sample(self, *args, sample_size):
         self.train()
-        results = [self(*args) for _ in range(sample_size)]
+        results = [torch.cat(self(*args), dim=-1) for _ in range(sample_size)]
         return torch.stack(results, dim=-1)
 
     def predict_step(self, *args: Any, **kwargs: Any) -> Any:

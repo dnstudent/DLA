@@ -8,7 +8,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 
-class MonotonicLSTMCell(jit.ScriptModule):
+class MonotonicLSTMCell(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, n_delta_layers: int):
         super().__init__()
         self.input_size = input_size
@@ -28,6 +28,7 @@ class MonotonicLSTMCell(jit.ScriptModule):
             in_size = forward_size
         self.delta_net = nn.Sequential(*modules, nn.Linear(in_size, 1))
         self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout_rate)
         self.init_recurrent_weights()
         self.init_recurrent_biases()
         self.init_sequential_params()
@@ -50,13 +51,13 @@ class MonotonicLSTMCell(jit.ScriptModule):
                 nn.init.zeros_(m.bias)
         self.delta_net.apply(weights_init)
 
-    @jit.script_method
+    # @jit.script_method
     def forward(self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
         hp, cp, zp = h
         gates = (
-            torch.mm(x, self.weight_ih.t())
+            torch.mm(self.dropout(x), self.weight_ih.t())
             + torch.mm(hp, self.weight_hh.t())
-            + torch.mm(zp, self.weight_zh.t())
+            + torch.mm(self.dropout(zp), self.weight_zh.t())
             + self.bias_h
         )
         It, Ft, ct, Ot = gates.chunk(4, 1)
@@ -70,43 +71,25 @@ class MonotonicLSTMCell(jit.ScriptModule):
         zt = zp + dt
         return zt, (ht, ct, zt)
 
-class MonotonicLSTMLayer(jit.ScriptModule):
+class MonotonicLSTMLayer(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, n_delta_layers: int):
         super().__init__()
         self.cell = MonotonicLSTMCell(input_size, hidden_size, forward_size, dropout_rate, n_delta_layers)
 
-    @jit.script_method
+    # @jit.script_method
     def forward(self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
-        inputs = x.unbind(1) # dim=1 is the timestep. Probably batch_first=False is faster
+        inputs = x.unbind(0) # dim=1 is the timestep in batch_first=True. Probably batch_first=False (dim=0) is faster
         outputs = jit.annotate(List[Tensor], [])
         for t in range(len(inputs)):
             output, h = self.cell(inputs[t], h)
             outputs += [output]
-        return torch.stack(outputs, dim=1), h
+        return torch.stack(outputs), h
 
-class MonotonicLSTM(jit.ScriptModule):
+class MonotonicLSTM(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, n_delta_layers: int):
         super().__init__()
         self.monotonic_layer = MonotonicLSTMLayer(input_size, hidden_size, forward_size, dropout_rate, n_delta_layers)
 
-    @jit.script_method
+    # @jit.script_method
     def forward(self, x: Tensor, h0: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
-        no_batch = x.ndim == 2
-        h0, c0, z0 = h0
-        if no_batch:
-            x = x.unsqueeze(0)
-            h0 = h0.unsqueeze(1)
-            c0 = c0.unsqueeze(1)
-            z0 = z0.unsqueeze(1)
-        h0 = h0.squeeze(0)
-        c0 = c0.squeeze(0)
-        z0 = z0.squeeze(0)
-        z, h = self.monotonic_layer(x, (h0, c0, z0))
-        if no_batch:
-            return z.squeeze(0), h
-        h, c, zt = h
-        h = h.unsqueeze(0)
-        c = c.unsqueeze(0)
-        zt = zt.unsqueeze(0)
-        h = (h, c, zt)
-        return z, h
+        return self.monotonic_layer(x, h0)

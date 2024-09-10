@@ -63,7 +63,7 @@ def make_spatiotemporal_dataset(full_table_loader, drivers_reader, depth_steps, 
     return _fn
 
 def make_spatiotemporal_dataset_v2(full_table_loader, drivers_reader, depth_steps, time_steps):
-    def _fn(ds_dir, drivers_path, embedded_features_csv_path):
+    def _fn(ds_dir, drivers_path, embedded_features_csv_path, T_squared, z_poly):
         table = full_table_loader(ds_dir, embedded_features_csv_path)
         table = table.filter(pl.col("temp").is_not_null()).sort("date", "depth")
         drivers = (
@@ -79,27 +79,39 @@ def make_spatiotemporal_dataset_v2(full_table_loader, drivers_reader, depth_step
             .sort("date")
         )
         table = table.join(drivers, on="date", how="semi")
+        y: pl.DataFrame = table.select(["temp"]).with_columns(density(pl.col("temp")).alias("density")).select(["temp", "density"])
+        if T_squared:
+            y = y.with_columns(temp = pl.col("temp")**2)
+        y = y.to_numpy().astype(np.float32).reshape((-1, depth_steps, 2))
+
+        d = table.select("depth", "glm_temp")
+        if z_poly:
+            d = d.with_columns(depth_third=np.cbrt(pl.col("depth")), depth3 = pl.col("depth")**3).select("depth", "glm_temp", "depth_third", "depth3")
+        d = d.to_numpy().astype(np.float32).reshape((len(y), depth_steps, -1))
+
         return (
             # d
-            table.select("depth", "glm_temp").to_numpy().astype(np.float32).reshape((-1, depth_steps, 2)),
+            d,
             # w
             drivers.drop("date").explode("features").unnest("features").drop("date").to_numpy().astype(np.float32).reshape((len(drivers), time_steps, -1)),
             # y
-            table.select(["temp"]).with_columns(density(pl.col("temp")).alias("density")).select(["temp", "density"]).to_numpy().astype(np.float32).reshape((-1, depth_steps, 2)),
+            y,
             # t
             drivers["date"].to_numpy()
         )
     return _fn
 
-def make_spatiotemporal_split_dataset_pedantic(spatiotemporal_dataset_maker):
-    def _fn(ds_dir, drivers_path, embedded_features_csv_path, test_size):
-        x, w, y, t = spatiotemporal_dataset_maker(ds_dir, drivers_path, embedded_features_csv_path)
-        (t_train, t_test), (w_train, w_test), (x_train, x_test), (y_train, y_test) = split_temporal_rolling(t, w, x, y, right_frac=test_size)
-        return x_train, x_test, w_train, w_test, y_train, y_test, t_train, t_test
-    return _fn
+# def make_spatiotemporal_split_dataset_pedantic(spatiotemporal_dataset_maker):
+#     def _fn(ds_dir, drivers_path, embedded_features_csv_path, test_size):
+#         x, w, y, t = spatiotemporal_dataset_maker(ds_dir, drivers_path, embedded_features_csv_path)
+#         (t_train, t_test), (w_train, w_test), (x_train, x_test), (y_train, y_test) = split_temporal_rolling(t, w, x, y, right_frac=test_size)
+#         return x_train, x_test, w_train, w_test, y_train, y_test, t_train, t_test
+#     return _fn
 
-def make_spatiotemporal_split_dataset(spatiotemporal_dataset_maker):
-    def _fn(ds_dir, drivers_path, embedded_features_csv_path, test_size, random_state=None, shuffle=False):
-        x, w, y, t = spatiotemporal_dataset_maker(ds_dir, drivers_path, embedded_features_csv_path)
-        return train_test_split(x, w, y, t, test_size=test_size, random_state=random_state, shuffle=shuffle)
+# 189: 4 anni in fcr
+def make_spatiotemporal_split_dataset(spatiotemporal_dataset_maker, split):
+    def _fn(ds_dir, drivers_path, embedded_features_csv_path, **kwargs):
+        x, w, y, t = spatiotemporal_dataset_maker(ds_dir, drivers_path, embedded_features_csv_path, **kwargs)
+        return x[:split], x[split:], w[:split], w[split:], y[:split], y[split:], t[:split], t[split:]
+        # return train_test_split(x, w, y, t, test_size=test_size, random_state=random_state, shuffle=shuffle)
     return _fn
