@@ -141,3 +141,6 @@ def take_frac(*arrs, axis, frac, shuffle, random_state):
         np.random.shuffle(indices)
     take_idx = indices[:int(ceil(len(indices)*frac))]
     return tuple([arr.take(take_idx, axis) for arr in arrs])
+
+def swap_batchtime(*arrs):
+    return [np.swapaxes(arr, 0, 1) for arr in [*arrs]]

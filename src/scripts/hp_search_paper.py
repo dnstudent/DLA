@@ -1,6 +1,7 @@
-import os
-import logging
 import argparse
+import logging
+import os
+
 logging.disable(logging.CRITICAL)
 
 import lightning as L
@@ -17,7 +18,6 @@ from torch.utils import data as tdata
 from src.datasets.fcr import spatiotemporal_split_dataset
 from src.datasets.tools import normalize_inputs, their_edge_padding
 from src.models import lstm
-from src.models.callbacks import BestScore
 
 
 def define_hparams(trial: optuna.Trial, physics_penalty):
@@ -26,17 +26,25 @@ def define_hparams(trial: optuna.Trial, physics_penalty):
         weight_decay = trial.suggest_float("weight_decay", 1e-7, 1, log=True)
     else:
         weight_decay = 0
-    # initial_lr = trial.suggest_float("initial_lr", 1e-5, 1e-1, log=True)
-    density_lambda = trial.suggest_float("density_lambda", 1e-2, 1e2, log=True)
     hparams = {
         "weight_decay": weight_decay,
-        # "initial_lr": initial_lr,
-        "density_lambda": density_lambda,
+        "initial_lr": trial.suggest_float("initial_lr", 1e-5, 1e-2, log=True),
+        "density_lambda": trial.suggest_float("density_lambda", 1e-2, 1e2, log=True),
     }
     if physics_penalty:
-        physics_penalty_lambda = trial.suggest_float("physics_penalty_lambda", 1e-2, 1e2, log=True)
-        hparams |= {"physics_penalty_lambda": physics_penalty_lambda}
+        hparams |= {"physics_penalty_lambda": trial.suggest_float("physics_penalty_lambda", 1e-2, 1e2, log=True)}
     return hparams
+
+def prepare_their_data(x, y, train_idxs, val_idxs, pad_size):
+    x_train, y_train = x[train_idxs], y[train_idxs]
+    x_val, y_val = x[val_idxs], y[val_idxs]
+    (x_train, y_train), (x_val, y_val), _, _ = normalize_inputs([x_train, y_train], [x_val, y_val])
+    x_train, x_val = their_edge_padding(x_train, x_val, pad_steps=pad_size, axis=1)
+
+    train_ds = tdata.TensorDataset(torch.from_numpy(x_train), torch.empty((len(x_train), 1, 1)),
+                                   torch.from_numpy(y_train))
+    val_ds = tdata.TensorDataset(torch.from_numpy(x_val), torch.empty((len(x_val), 1, 1)), torch.from_numpy(y_val))
+    return train_ds, val_ds
 
 def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_dir, work_dir, n_devices, profile, log, seed, embedding_version):
     L.seed_everything(seed)
@@ -57,15 +65,8 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
         val_sizes = []
         hparams = define_hparams(trial, physics_penalty)
         for i, (train_idxs, val_idxs) in track(enumerate(cv.split(x, y)), total=cv.n_splits, auto_refresh=False, transient=True, description=f"Trial {trial.number}"):
-            x_train, y_train = x[train_idxs], y[train_idxs]
-            x_val, y_val = x[val_idxs], y[val_idxs]
-            (x_train, y_train), (x_val, y_val), _, _ = normalize_inputs([x_train, y_train], [x_val, y_val])
-            x_train, x_val = their_edge_padding(x_train, x_val, pad_steps=pad_size)
+            train_ds, val_ds = prepare_their_data(x, y, train_idxs, val_idxs, pad_size)
 
-            train_ds = tdata.TensorDataset(torch.from_numpy(x_train), torch.empty((len(x_train), 1, 1)), torch.from_numpy(y_train))
-            val_ds = tdata.TensorDataset(torch.from_numpy(x_val), torch.empty((len(x_val), 1, 1)), torch.from_numpy(y_val))
-
-            best_score_logger = BestScore(monitor="valid/score/t", mode="max")
             trainer = L.Trainer(
                 max_epochs=max_epochs,
                 enable_checkpointing=False,
@@ -74,26 +75,24 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
                 enable_progress_bar=False,
                 callbacks=[
                     EarlyStopping(monitor="valid/score/t", patience=patience, mode="max"),
-                    best_score_logger
                 ],
                 logger=TensorBoardLogger(name=f'trial_{trial.number}', save_dir=os.path.join(work_dir, "logs"), version=f"fold_{i+1}") if log and i == 0 else False,
-                log_every_n_steps=2,
+                log_every_n_steps=1,
                 profiler=SimpleProfiler(dirpath=work_dir, filename="perf_logs") if profile else None,
                 gradient_clip_val=1,
                 gradient_clip_algorithm="norm"
             )
-            model = model_class(n_input_features=n_input_features, skip_first=pad_size,  multiproc=multiproc, dropout_rate=0.2, initial_lr=1e-3, **hparams)
+            model = model_class(n_input_features=n_input_features, skip_first=pad_size,  multiproc=multiproc, dropout_rate=0.2, **hparams)
 
             trainer.fit(
                 model,
-                train_dataloaders=tdata.DataLoader(train_ds, batch_size=20, shuffle=True),
+                train_dataloaders=tdata.DataLoader(train_ds, batch_size=128, shuffle=True),
                 val_dataloaders=tdata.DataLoader(val_ds, batch_size=256, shuffle=False),
             )
-            # if trainer.logger:
-            #     trainer.logger.log_hyperparams(params=hparams, metrics=trainer.callback_metrics)
-            nrmse_scores.append(best_score_logger.best_score)
-            val_sizes.append(len(x_val))
-            trial.report(best_score_logger.best_score, i)
+
+            nrmse_scores.append(trainer.logged_metrics["valid/score/t"].item())
+            trial.report(trainer.logged_metrics["valid/score/t"].item(), i)
+            val_sizes.append(len(val_ds))
             if trial.should_prune():
                 raise optuna.TrialPruned()
         nrmse_score = np.average(nrmse_scores, weights=val_sizes)
@@ -139,7 +138,7 @@ def add_program_arguments(parser):
         "--patience",
         action="store",
         type=int,
-        default=1000,
+        default=200,
         help="Patience of the early stopping algorithm"
     )
     parser.add_argument(

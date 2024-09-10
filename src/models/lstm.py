@@ -29,7 +29,6 @@ class TZRegressor(nn.Module):
         self.initializer = initializer
         self.density_regressor = density_regressor
         self.temperature_regressor = temperature_regressor
-        self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x: Tensor, w: Tensor) -> Tuple[Tensor, Tensor]:
         z0_hat = self.initializer(w)
@@ -88,7 +87,7 @@ class LitTZRegressor(L.LightningModule):
         # z_hat = self.density_regressor(self.dropout(x), z0_hat)
         # t_hat = self.temperature_regressor(self.dropout(x), z_hat)[:, self.skip_first:, :].clone()
         t, z = self.tz_regressor(x, w)
-        return z[:, self.skip_first:, :].clone(), z[:, self.skip_first:, :].clone()
+        return t[:, self.skip_first:].clone(), z[:, self.skip_first:].clone()
 
     def training_step(self, batch, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
         x, w, y = batch
@@ -123,9 +122,9 @@ class LitTZRegressor(L.LightningModule):
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "train/loss/total"}
 
 class LitLSTM(LitTZRegressor):
-    def __init__(self, n_input_features: int, skip_first: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, density_lambda: float, dropout_rate: float, multiproc: bool, **kwargs):
+    def __init__(self, n_input_features: int, skip_first: int, initial_lr: float, lr_decay_rate: Optional[float], weight_decay: float, density_lambda: float, dropout_rate: float, multiproc: bool, **kwargs):
         initializer = DummyInitializer()
-        density_regressor = LSTMDensityRegressor(n_input_features, hidden_size=8, forward_size=5, dropout_rate=dropout_rate)
+        density_regressor = LSTMDensityRegressor(n_input_features, hidden_size=8, forward_size=5, dropout_rate=dropout_rate, batch_first=True)
         super().__init__(initializer, density_regressor, n_input_features, None, skip_first, initial_lr, lr_decay_rate,
                          weight_decay, density_lambda, dropout_rate, multiproc)
 
@@ -138,9 +137,9 @@ class TheirLSTM(LitLSTM):
         return configure_their_optimizer(self.tz_regressor.density_regressor, self.tz_regressor.temperature_regressor, self.initial_lr, self.weight_decay)
 
 class LitPGL(LitTZRegressor):
-    def __init__(self, n_input_features: int, skip_first: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, physics_penalty_lambda: float, density_lambda: float, dropout_rate: float, multiproc: bool, **kwargs):
+    def __init__(self, n_input_features: int, skip_first: int, initial_lr: float, lr_decay_rate: Optional[float], weight_decay: float, physics_penalty_lambda: float, density_lambda: float, dropout_rate: float, multiproc: bool, **kwargs):
         initializer = DummyInitializer()
-        density_regressor = LSTMDensityRegressor(n_input_features, hidden_size=8, forward_size=5, dropout_rate=dropout_rate)
+        density_regressor = LSTMDensityRegressor(n_input_features, hidden_size=8, forward_size=5, dropout_rate=dropout_rate, batch_first=True)
         super().__init__(initializer, density_regressor, n_input_features, None, skip_first, initial_lr, lr_decay_rate,
                          weight_decay, density_lambda, dropout_rate, multiproc)
         self.physics_penalty_lambda = physics_penalty_lambda
@@ -163,15 +162,15 @@ class TheirPGL(LitPGL):
                                          self.weight_decay)
 
 class LitPGA(LitTZRegressor):
-    def __init__(self, initializer: nn.Module, n_input_features: int, n_initial_features: Optional[int], skip_first: int, initial_lr: float, lr_decay_rate: float, weight_decay: float, hidden_size: int, forward_size: int, density_lambda: float, dropout_rate: float, multiproc: bool, **kwargs):
-        density_regressor = MonotonicDensityRegressor(n_input_features, hidden_size, forward_size, dropout_rate, n_delta_layers=3)
+    def __init__(self, initializer: nn.Module, n_input_features: int, n_initial_features: Optional[int], skip_first: int, initial_lr: float, lr_decay_rate: Optional[float], weight_decay: float, hidden_size: int, forward_size: int, density_lambda: float, dropout_rate: float, multiproc: bool, **kwargs):
+        density_regressor = MonotonicDensityRegressor(n_input_features, hidden_size, forward_size, dropout_rate)
         super().__init__(initializer, density_regressor, n_input_features, n_initial_features, skip_first, initial_lr,
                          lr_decay_rate, weight_decay, density_lambda, dropout_rate, multiproc)
 
 class TheirPGA(LitPGA):
     def __init__(self, n_input_features: int, skip_first: int, *, initial_lr: float = 1e-3, weight_decay: float = 0.05, density_lambda: float = 5.0, multiproc: bool, **kwargs):
         initializer = FullInitializer(0.0)
-        super().__init__(initializer, n_input_features, None, skip_first, initial_lr, lr_decay_rate=0.999999999, weight_decay=weight_decay, hidden_size=8, forward_size=5, density_lambda=density_lambda, dropout_rate=0.2, multiproc=multiproc)
+        super().__init__(initializer, n_input_features, None, skip_first, initial_lr, None, weight_decay=weight_decay, hidden_size=8, forward_size=5, density_lambda=density_lambda, dropout_rate=0.2, multiproc=multiproc)
         self.save_hyperparameters()
 
     def configure_optimizers(self) -> OptimizerLRScheduler:

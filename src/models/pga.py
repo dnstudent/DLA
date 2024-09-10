@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, List
+from typing import Tuple, List
 
 import torch
 import torch.nn.functional as F
@@ -9,7 +9,7 @@ from torch.nn.parameter import Parameter
 
 
 class MonotonicLSTMCell(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, n_delta_layers: int):
+    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -17,16 +17,11 @@ class MonotonicLSTMCell(nn.Module):
         self.weight_hh = Parameter(torch.empty(4 * hidden_size, hidden_size))
         self.weight_zh = Parameter(torch.empty(4 * hidden_size, 1))
         self.bias_h = Parameter(torch.empty(4 * hidden_size))
-        modules = []
-        in_size = hidden_size
-        for _ in range(n_delta_layers-1):
-            modules.extend([
-                nn.Linear(in_size, forward_size),
-                nn.Dropout(dropout_rate),
-                nn.ReLU()
-            ])
-            in_size = forward_size
-        self.delta_net = nn.Sequential(*modules, nn.Linear(in_size, 1))
+        self.delta_net = nn.Sequential(
+            nn.Linear(hidden_size, forward_size), nn.Dropout(dropout_rate), nn.ReLU(),
+            nn.Linear(forward_size, forward_size), nn.Dropout(dropout_rate), nn.ReLU(),
+            nn.Linear(forward_size, 1), nn.ReLU()
+        )
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout_rate)
         self.init_recurrent_weights()
@@ -56,39 +51,40 @@ class MonotonicLSTMCell(nn.Module):
         hp, cp, zp = h
         gates = (
             torch.mm(self.dropout(x), self.weight_ih.t())
-            + torch.mm(hp, self.weight_hh.t())
+            + torch.mm(hp.squeeze(0), self.weight_hh.t())
             + torch.mm(self.dropout(zp), self.weight_zh.t())
             + self.bias_h
         )
-        It, Ft, ct, Ot = gates.chunk(4, 1)
+        It, Ft, Ct, Ot = gates.chunk(4, 1)
         It = F.hardsigmoid(It)
         Ft = F.hardsigmoid(Ft)
-        ct = Ft*cp + It*torch.tanh(ct)
+        ct = Ft*cp.squeeze(0) + It*torch.tanh(Ct)
         Ot = F.hardsigmoid(Ot)
         ht = Ot * torch.tanh(ct)
         # Monotonicity-preserving step
-        dt = self.relu(self.delta_net(ht))
+        dt = self.delta_net(ht)
         zt = zp + dt
         return zt, (ht, ct, zt)
 
 class MonotonicLSTMLayer(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, n_delta_layers: int):
+    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float):
         super().__init__()
-        self.cell = MonotonicLSTMCell(input_size, hidden_size, forward_size, dropout_rate, n_delta_layers)
+        self.cell = MonotonicLSTMCell(input_size, hidden_size, forward_size, dropout_rate)
 
     # @jit.script_method
     def forward(self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
-        inputs = x.unbind(0) # dim=1 is the timestep in batch_first=True. Probably batch_first=False (dim=0) is faster
+        inputs = x.unbind(1) # dim=1 is the timestep in batch_first=True. Probably batch_first=False (dim=0) is faster
         outputs = jit.annotate(List[Tensor], [])
         for t in range(len(inputs)):
             output, h = self.cell(inputs[t], h)
             outputs += [output]
-        return torch.stack(outputs), h
+        return torch.stack(outputs, dim=1), h
 
 class MonotonicLSTM(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, n_delta_layers: int):
+    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, batch_first: bool = True):
+        assert batch_first, "Only batch first is supported"
         super().__init__()
-        self.monotonic_layer = MonotonicLSTMLayer(input_size, hidden_size, forward_size, dropout_rate, n_delta_layers)
+        self.monotonic_layer = MonotonicLSTMLayer(input_size, hidden_size, forward_size, dropout_rate)
 
     # @jit.script_method
     def forward(self, x: Tensor, h0: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
