@@ -104,8 +104,8 @@ def full_table(ds_dir, embedded_features_csv_path):
     )
 
 spatiotemporal_dataset = make_spatiotemporal_dataset(full_table, read_drivers_table, depth_steps=28, time_steps=7)
-spatiotemporal_split_dataset = make_spatiotemporal_split_dataset(spatiotemporal_dataset, split=189)
+spatiotemporal_split_dataset = make_spatiotemporal_split_dataset(spatiotemporal_dataset, split=188)
 
 
 spatiotemporal_dataset_v2 = make_spatiotemporal_dataset_v2(full_table, read_drivers_table, depth_steps=28, time_steps=7)
-spatiotemporal_split_dataset_v2 = make_spatiotemporal_split_dataset(spatiotemporal_dataset_v2, split=189)
+spatiotemporal_split_dataset_v2 = make_spatiotemporal_split_dataset(spatiotemporal_dataset_v2, split=188)

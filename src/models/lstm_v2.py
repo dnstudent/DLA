@@ -14,6 +14,18 @@ from .initializers import LSTMZ0InitializerV2, LSTMNoZInitializerV2
 from .temperature_regressors import TemperatureRegressorV2, CustomTV2
 from .tools import physical_consistency, physical_inconsistency
 
+class TZRegressorV2(nn.Module):
+    def __init__(self, weather_preprocessor, density_regressor, temperature_regressor):
+        super().__init__()
+        self.weather_preprocessor = weather_preprocessor
+        self.density_regressor = density_regressor
+        self.temperature_regressor = temperature_regressor
+
+    def forward(self, x: Tensor, w: Tensor) -> Tuple[Tensor, Tensor]:
+        z0_hat, h0 = self.weather_preprocessor(w)
+        z_hat = self.density_regressor(x, h0, z0_hat)
+        t_hat = self.temperature_regressor(z_hat, x, h0)
+        return t_hat, z_hat
 
 class LitTZRegressorV2(L.LightningModule):
     def __init__(self,
@@ -166,10 +178,9 @@ class SmallNet(LitTZRegressorV2):
                  forward_size: int,
                  weather_embedding_size: int,
                  hidden_size: int,
-                 n_delta_layers: int
                  ):
         initializer = LSTMZ0InitializerV2(n_weather_features, weather_embedding_size, dropout_rate)
-        density_regressor = MonotonicDensityRegressorV2(n_depth_features, weather_embedding_size, hidden_size, forward_size, dropout_rate, n_delta_layers)
+        density_regressor = MonotonicDensityRegressorV2(n_depth_features, weather_embedding_size, hidden_size, forward_size, dropout_rate)
         temperature_regressor = CustomTV2(weather_embedding_size, hidden_size=2, dropout_rate=dropout_rate)
         super().__init__(initializer, density_regressor, temperature_regressor, n_depth_features, n_weather_features, None, None, weight_decay, density_lambda, dropout_rate, multiproc)
         self.initial_lr1 = initial_lr1
@@ -178,11 +189,24 @@ class SmallNet(LitTZRegressorV2):
 
     @override
     def configure_optimizers(self) -> OptimizerLRScheduler:
+        first_linear_kernel = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
+                               name == "first_linear.weight"]
+        other_params = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
+                        name != "first_linear.weight"]
         optimizer = torch.optim.Adam([
             {"params": self.weather_preprocessor.parameters(), "lr": self.initial_lr1},
             {"params": self.density_regressor.parameters(), "lr": self.initial_lr2},
             {"params": self.temperature_regressor.parameters(), "lr": self.initial_lr3},
         ], weight_decay=0.0)
+        first_linear_kernel = [param for name, param in temperature_regressor.named_parameters() if
+                               name == "first_linear.weight"]
+        other_params = [param for name, param in temperature_regressor.named_parameters() if
+                        name != "first_linear.weight"]
+        return torch.optim.Adam([
+            {"params": density_regressor.parameters()},
+            {"params": first_linear_kernel, "weight_decay": weight_decay},
+            {"params": other_params},
+        ], lr=lr, eps=1e-7, weight_decay=0.0)
         # scheduler = ReduceLROnPlateau(optimizer, factor=self.lr_decay_rate, patience=1_000, min_lr=5e-5, cooldown=200)
         # return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "train/loss/total"}
         return optimizer

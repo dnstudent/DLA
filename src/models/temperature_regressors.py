@@ -2,29 +2,45 @@ from typing import Tuple
 
 import torch
 from torch import nn, Tensor
+from torch.nn.functional import dropout
 
+class TheirTemperatureRegressor(nn.Module):
+    def __init__(self, n_input_features: int):
+        super().__init__()
+        self.first_linear = nn.Linear(n_input_features + 1, 5)
+        self.first_activation = nn.ELU(alpha=1.0)
+        self.second_linear = nn.Linear(5, 1)
 
-class TemperatureRegressor(nn.Module):
-    def __init__(self, n_input_features, forward_size):
+    def forward(self, x: Tensor, z: Tensor) -> Tensor:
+        x = torch.cat((x, z), dim=-1)
+        x = self.first_linear(x)
+        x = self.first_activation(x)
+        return self.second_linear(x)
+
+class FullDOutTemperatureRegressor(nn.Module):
+    def __init__(self, n_input_features, forward_size, dropout_rate):
         super().__init__()
         self.first_linear = nn.Linear(n_input_features + 1, forward_size)
         self.first_activation = nn.ELU(alpha=1.0)
         self.second_linear = nn.Linear(forward_size, 1)
+        self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x: Tensor, z: Tensor) -> Tensor:
-        x = self.first_activation(self.first_linear(torch.cat((x, z), dim=-1)))
-        return self.second_linear(x)
+        x = torch.cat((x, z), dim=-1)
+        x = self.first_activation(self.first_linear(self.dropout(x)))
+        return self.second_linear(self.dropout(x))
 
 class TemperatureRegressorV2(nn.Module):
-    def __init__(self, n_wembed_features, dropout_rate):
+    def __init__(self, n_depth_features: int, weather_embedding_size: int, dropout_rate: float):
         super().__init__()
-        self.recurrent = nn.LSTM(1, hidden_size=n_wembed_features, batch_first=True)
+        self.recurrent = nn.GRU(1 + n_depth_features, hidden_size=weather_embedding_size, batch_first=True)
         self.activation = nn.ELU(alpha=1.0)
-        self.output_layer = nn.Linear(n_wembed_features, 1)
+        self.output_layer = nn.Linear(weather_embedding_size, 1)
+        self.dropout = nn.Dropout(dropout_rate)
 
-    def forward(self, d: Tensor, h0: Tuple[Tensor, Tensor]):
-        d, _ = self.recurrent(d, h0)
-        return self.output_layer(self.activation(d))
+    def forward(self, z: Tensor, x: Tensor, h0: Tuple[Tensor, Tensor]):
+        t, _ = self.recurrent(torch.cat((z, self.dropout(x)), dim=-1), h0[0])
+        return self.output_layer(self.activation(t))
 
 
 class CustomTV2(nn.Module):

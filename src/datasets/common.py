@@ -107,10 +107,8 @@ def make_spatiotemporal_dataset_v2(full_table_loader, drivers_reader, depth_step
 #         return x_train, x_test, w_train, w_test, y_train, y_test, t_train, t_test
 #     return _fn
 
-# 189: 4 anni in fcr
 def make_spatiotemporal_split_dataset(spatiotemporal_dataset_maker, split):
     def _fn(ds_dir, drivers_path, embedded_features_csv_path, **kwargs):
         x, w, y, t = spatiotemporal_dataset_maker(ds_dir, drivers_path, embedded_features_csv_path, **kwargs)
         return x[:split], x[split:], w[:split], w[split:], y[:split], y[split:], t[:split], t[split:]
-        # return train_test_split(x, w, y, t, test_size=test_size, random_state=random_state, shuffle=shuffle)
     return _fn

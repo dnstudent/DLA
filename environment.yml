@@ -2,7 +2,6 @@ channels:
   - apple
   - pytorch
 dependencies:
-  - python=3.11
   - pytorch::pytorch
   - torchvision
   - torchaudio
@@ -10,6 +9,7 @@ dependencies:
   - lightning
   - scikit-learn
   - polars
+  - pandas
   - matplotlib
   - seaborn
   - tqdm
@@ -17,6 +17,9 @@ dependencies:
   - notebook
   - tensorboard
   - optuna
-  - pip
-  - pip:
-      - ray[all]
+  - optuna-integration
+  - altair
+  - keras
+  - tensorflow
+  - ipywidgets
+  - pyarrow
