@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
 from torch import nn, Tensor
@@ -26,8 +26,8 @@ class FullDOutTemperatureRegressor(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x: Tensor, z: Tensor) -> Tensor:
-        x = torch.cat((x, z), dim=-1)
-        x = self.first_activation(self.first_linear(self.dropout(x)))
+        x = torch.cat((self.dropout(x), z), dim=-1)
+        x = self.first_activation(self.first_linear(x))
         return self.second_linear(self.dropout(x))
 
 class TemperatureRegressorV2(nn.Module):
@@ -41,6 +41,19 @@ class TemperatureRegressorV2(nn.Module):
     def forward(self, z: Tensor, x: Tensor, h0: Tuple[Tensor, Tensor]):
         t, _ = self.recurrent(torch.cat((z, self.dropout(x)), dim=-1), h0[0])
         return self.output_layer(self.activation(t))
+
+class TheirTemperatureRegressorV2(nn.Module):
+    def __init__(self, n_input_features: int):
+        super().__init__()
+        self.first_linear = nn.Linear(n_input_features + 1, 5)
+        self.first_activation = nn.ELU(alpha=1.0)
+        self.second_linear = nn.Linear(5, 1)
+
+    def forward(self, z:Tensor, x: Tensor, _: Optional[Tensor] = None) -> Tensor:
+        x = torch.cat((x, z), dim=-1)
+        x = self.first_linear(x)
+        x = self.first_activation(x)
+        return self.second_linear(x)
 
 
 class CustomTV2(nn.Module):

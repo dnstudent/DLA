@@ -9,7 +9,7 @@ from lightning.pytorch.utilities.types import EVAL_DATALOADERS
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 
-from .common import make_autoencoder_dataset, make_autoencoder_split_dataset
+from .common import make_autoencoder_dataset, make_autoencoder_split_dataset, make_spatiotemporal_dataset, make_spatiotemporal_split_dataset, make_spatiotemporal_dataset_v2
 from .tools import density
 from .transformers import scale_wds, StandardScaler
 from .windowed import WindowedDataset
@@ -67,15 +67,15 @@ def full_table(ds_dir, embedded_features_csv_path):
     ds_dir = Path(ds_dir)
     time_features = read_drivers_table(ds_dir / "mendota_meteo.feather")
     # GLM data seems incorrect. Many values are identical
-    # glm_temperatures = (
-    #     pl.read_ipc(ds_dir / "mendota_GLM_uncal_temperatures_anuj.feather")
-    #     .with_columns(pl.col("DateTime").dt.date().alias("date"))
-    #     .drop("DateTime")
-    #     .unpivot(index=["ice", "date"], value_name="glm_temp")
-    #     .with_columns(pl.col("variable").str.split_exact("_", 1).struct.rename_fields(["_", "depth"]).struct.field("depth").cast(pl.Float32))
-    #     .drop("variable")
-    #     .sort("date", "depth")
-    # )
+    glm_temperatures = (
+        pl.read_ipc(ds_dir / "mendota_GLM_uncal_temperatures_anuj.feather")
+        .with_columns(pl.col("DateTime").dt.date().alias("date"))
+        .drop("DateTime")
+        .unpivot(index=["ice", "date"], value_name="glm_temp")
+        .with_columns(pl.col("variable").str.split_exact("_", 1).struct.rename_fields(["_", "depth"]).struct.field("depth").cast(pl.Float32))
+        .drop("variable")
+        .sort("date", "depth")
+    )
     actual_temperatures = pl.read_ipc(ds_dir / 'Mendota_buoy_data_anuj.feather', use_pyarrow=True).rename({"DateTime": "date"}).filter(pl.col("temp").is_not_null())
     valid_dates = actual_temperatures.filter(pl.col("Depth") <= 20.0).group_by("date").len().filter(pl.col("len") >= 23).drop("len")
     valid_depths = actual_temperatures.join(valid_dates, on="date", how="semi").group_by("Depth").len().sort("len").filter(
@@ -104,14 +104,8 @@ def full_table(ds_dir, embedded_features_csv_path):
         .sort("date", "depth")
     )
 
-def spatiotemporal_dataset(ds_dir, embedded_features_csv_path, depth_steps=21):
-    table = full_table(ds_dir, embedded_features_csv_path)
-    table = table.filter(pl.col("temp_observed").is_not_null()).sort("date", "depth").drop("date")
-    return (
-        table.drop(["temp_observed"]).to_numpy().astype(np.float32).reshape((-1, depth_steps, len(table.columns) - 1)),
-        table.with_columns(density(pl.col("temp_observed")).alias("density")).select(["temp_observed", "density"]).to_numpy().astype(np.float32).reshape((-1, depth_steps, 2))
-    )
+spatiotemporal_dataset = make_spatiotemporal_dataset(full_table, read_drivers_table, depth_steps=21, time_steps=7)
+spatiotemporal_split_dataset = make_spatiotemporal_split_dataset(spatiotemporal_dataset, split=188)
 
-def spatiotemporal_split_dataset(ds_dir, embedded_features_csv_path, test_size, depth_steps=21, seed=42, shuffle=False):
-    X, y = spatiotemporal_dataset(ds_dir, embedded_features_csv_path, depth_steps)
-    return train_test_split(X, y, test_size=test_size, random_state=seed if shuffle else None, shuffle=shuffle)
+spatiotemporal_dataset_v2 = make_spatiotemporal_dataset_v2(full_table, read_drivers_table, depth_steps=21, time_steps=7)
+spatiotemporal_split_dataset_v2 = make_spatiotemporal_split_dataset(spatiotemporal_dataset_v2, split=188)

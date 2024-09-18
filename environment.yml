@@ -23,3 +23,6 @@ dependencies:
   - tensorflow
   - ipywidgets
   - pyarrow
+  - psycopg2
+  - tabulate
+  - jax

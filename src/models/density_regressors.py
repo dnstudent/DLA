@@ -19,49 +19,46 @@ class DensityRegressorV2(ABC):
         pass
 
 class TheirDensityRegressor(DensityRegressor, nn.Module):
-    def __init__(self, n_features: int, dropout_rate: float):
+    def __init__(self, n_input_features: int, dropout_rate: float):
         super().__init__()
-        self.lstm = nn.LSTM(n_features, 8, batch_first=True)
+        self.lstm = nn.LSTM(n_input_features, 8, batch_first=True)
         self.dense_layers = nn.Sequential(
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(8, 5),
-            nn.Dropout(dropout_rate),
             nn.ReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(5, 5),
-            nn.Dropout(dropout_rate),
             nn.ReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(5, 1)
         )
 
     def forward(self, x: Tensor, _: Optional[Tensor]) -> Tensor:
         x = self.lstm(x)[0]
-        return self.dense_layers(relu(x))
+        return self.dense_layers(x)
 
-class LSTMDensityRegressor(DensityRegressor, nn.Module):
+class FullDOutDensityRegressor(DensityRegressor, nn.Module):
     """Network estimating densities from features. Expects `Xd` as input. Output has size 1
     """
-    def __init__(self, n_features, hidden_size, forward_size, dropout_rate, batch_first):
+    def __init__(self, n_input_features, hidden_size, forward_size, dropout_rate):
         super().__init__()
-        self.lstm = nn.LSTM(n_features, hidden_size, batch_first=batch_first)
+        self.lstm = nn.LSTM(n_input_features, hidden_size, batch_first=True)
         self.dense_layers = nn.Sequential(
+            nn.ReLU(),
             nn.Dropout(dropout_rate),
             nn.Linear(hidden_size, forward_size),
-            nn.Dropout(dropout_rate),
             nn.ReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(forward_size, forward_size),
-            nn.Dropout(dropout_rate),
             nn.ReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(forward_size, 1)
         )
 
-    def forward(self, x: Tensor, z0: Optional[Tensor]) -> Tensor:
-        x = dropout(x, p=self.dropout_rate, training=True)
-        x, _ = self.lstm(x)
-        x = dropout(relu(x), p=self.dropout_rate, training=True)
-        x = self.dense1(x)
-        x = dropout(relu(x), p=self.dropout_rate, training=True)
-        x = self.dense2(x)
-        x = dropout(relu(x), p=self.dropout_rate, training=True)
-        return self.out(x)
+    def forward(self, x: Tensor, _: Optional[Tensor]) -> Tensor:
+        x = self.lstm(x)[0]
+        return self.dense_layers(x)
 
 class LSTMDensityRegressorV2(DensityRegressorV2, nn.Module):
     def __init__(self, n_depth_features, hidden_size, forward_size, dropout_rate):
@@ -93,7 +90,7 @@ class TheirMonotonicRegressor(DensityRegressor, nn.Module):
         h0 = (zeros, zeros, z0)
         return self.net(x, h0)[0]
 
-class MonotonicRegressor(DensityRegressor, nn.Module):
+class FullDOutMonotonicRegressor(DensityRegressor, nn.Module):
     def __init__(self, n_input_features: int, hidden_size: int, forward_size: int, dropout_rate: float):
         super().__init__()
         self.net = MonotonicLSTM(n_input_features, hidden_size, forward_size, dropout_rate, cell=MonotonicLSTMCell)
@@ -108,22 +105,14 @@ class MonotonicRegressor(DensityRegressor, nn.Module):
 class MonotonicDensityRegressorV2(DensityRegressorV2, nn.Module):
     def __init__(self, n_depth_features: int, weather_embeddings_size: int, hidden_size: int, forward_size: int, dropout_rate: float):
         super().__init__()
-        self.net = MonotonicLSTM(n_depth_features, hidden_size, forward_size, dropout_rate)
-        if hidden_size > 1:
-            if weather_embeddings_size > 1:
-                self.hadapter = nn.Sequential(nn.Dropout(dropout_rate), nn.Linear(weather_embeddings_size, hidden_size), nn.Dropout(dropout_rate))
-                self.cadapter = nn.Sequential(nn.Dropout(dropout_rate), nn.Linear(weather_embeddings_size, hidden_size), nn.Dropout(dropout_rate))
-            else:
-                self.hadapter = nn.Sequential(nn.Linear(weather_embeddings_size, hidden_size), nn.Dropout(dropout_rate))
-                self.cadapter = nn.Sequential(nn.Linear(weather_embeddings_size, hidden_size), nn.Dropout(dropout_rate))
+        self.net = MonotonicLSTM(input_size=n_depth_features, hidden_size=hidden_size, forward_size=forward_size, dropout_rate=dropout_rate, cell=MonotonicLSTMCell)
+        if weather_embeddings_size > 1:
+            self.hadapter = nn.Sequential(nn.Dropout(dropout_rate), nn.ReLU(), nn.Linear(weather_embeddings_size, hidden_size))
+            self.cadapter = nn.Sequential(nn.Dropout(dropout_rate), nn.ReLU(), nn.Linear(weather_embeddings_size, hidden_size))
         else:
-            if weather_embeddings_size > 1:
-                self.hadapter = nn.Sequential(nn.Dropout(dropout_rate), nn.Linear(weather_embeddings_size, hidden_size))
-                self.cadapter = nn.Sequential(nn.Dropout(dropout_rate), nn.Linear(weather_embeddings_size, hidden_size))
-            else:
-                self.hadapter = nn.Sequential(nn.Linear(weather_embeddings_size, hidden_size))
-                self.cadapter = nn.Sequential(nn.Linear(weather_embeddings_size, hidden_size))
-        self.zadapter = nn.Linear(1, 1)
+            self.hadapter = nn.Sequential(nn.Linear(weather_embeddings_size, hidden_size))
+            self.cadapter = nn.Sequential(nn.Linear(weather_embeddings_size, hidden_size))
+        self.zadapter = nn.Sequential(nn.ReLU(), nn.Linear(1, 1))
 
     def forward(self, d: Tensor, h0: Tuple[Tensor, Tensor], z0: Tensor) -> Tensor:
         h0, c0 = h0

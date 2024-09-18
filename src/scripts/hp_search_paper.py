@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+from typing import Tuple
 
 logging.disable(logging.CRITICAL)
 
@@ -16,8 +17,9 @@ from sklearn.model_selection import TimeSeriesSplit
 from torch.utils import data as tdata
 
 from src.datasets.fcr import spatiotemporal_split_dataset
-from src.datasets.tools import normalize_inputs, their_edge_padding
+from src.datasets.tools import normalize_inputs
 from src.models import lstm
+from src.tools.paths import ds_dir, drivers_path, embedding_path
 
 
 def define_hparams(trial: optuna.Trial, physics_penalty):
@@ -28,44 +30,38 @@ def define_hparams(trial: optuna.Trial, physics_penalty):
         weight_decay = 0
     hparams = {
         "weight_decay": weight_decay,
-        "initial_lr": trial.suggest_float("initial_lr", 1e-5, 1e-2, log=True),
+        "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
         "density_lambda": trial.suggest_float("density_lambda", 1e-2, 1e2, log=True),
     }
     if physics_penalty:
         hparams |= {"physics_penalty_lambda": trial.suggest_float("physics_penalty_lambda", 1e-2, 1e2, log=True)}
     return hparams
 
-def prepare_their_data(x, y, train_idxs, val_idxs, pad_size):
+def prepare_their_data(x, y, train_idxs, val_idxs) -> Tuple[tdata.Dataset, tdata.Dataset]:
     x_train, y_train = x[train_idxs], y[train_idxs]
     x_val, y_val = x[val_idxs], y[val_idxs]
     (x_train, y_train), (x_val, y_val), _, _ = normalize_inputs([x_train, y_train], [x_val, y_val])
-    x_train, x_val = their_edge_padding(x_train, x_val, pad_steps=pad_size, axis=1)
 
     train_ds = tdata.TensorDataset(torch.from_numpy(x_train), torch.empty((len(x_train), 1, 1)),
                                    torch.from_numpy(y_train))
     val_ds = tdata.TensorDataset(torch.from_numpy(x_val), torch.empty((len(x_val), 1, 1)), torch.from_numpy(y_val))
     return train_ds, val_ds
 
-def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_dir, work_dir, n_devices, profile, log, seed, embedding_version):
+def objective(model_name, accelerator, max_epochs, patience, work_dir, n_devices, profile, log, seed, embedding_version, with_glm):
     L.seed_everything(seed)
-    if embedding_version:
-        embedding_path = os.path.join(embedding_dir, f"{embedding_version}.csv")
-    else:
-        embedding_path = None
     # Retrieving "train" dataset
-    x, _, _, _, y, _, _, _ = spatiotemporal_split_dataset(ds_dir, os.path.join(ds_dir, "FCR_2013_2018_Drivers.csv"), embedding_path)
+    x, _, _, _, y, _, _, _ = spatiotemporal_split_dataset(ds_dir("."), drivers_path(".", "fcr"), embedding_path(".", "fcr", embedding_version), with_glm)
     n_input_features = x.shape[-1]
     multiproc = n_devices > 1
     model_class = getattr(lstm, model_name)
     physics_penalty = "PGL" in model_name
-    pad_size = 10
     def _fn(trial: optuna.Trial):
         cv = TimeSeriesSplit(n_splits=4, gap=31)
         nrmse_scores = []
         val_sizes = []
         hparams = define_hparams(trial, physics_penalty)
         for i, (train_idxs, val_idxs) in track(enumerate(cv.split(x, y)), total=cv.n_splits, auto_refresh=False, transient=True, description=f"Trial {trial.number}"):
-            train_ds, val_ds = prepare_their_data(x, y, train_idxs, val_idxs, pad_size)
+            train_ds, val_ds = prepare_their_data(x, y, train_idxs, val_idxs)
 
             trainer = L.Trainer(
                 max_epochs=max_epochs,
@@ -82,7 +78,7 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
                 gradient_clip_val=1,
                 gradient_clip_algorithm="norm"
             )
-            model = model_class(n_input_features=n_input_features, skip_first=pad_size,  multiproc=multiproc, dropout_rate=0.2, **hparams)
+            model = model_class(n_input_features=n_input_features,  multiproc=multiproc, dropout_rate=0.2, **hparams)
 
             trainer.fit(
                 model,
@@ -95,10 +91,9 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
             val_sizes.append(len(val_ds))
             if trial.should_prune():
                 raise optuna.TrialPruned()
-        nrmse_score = np.average(nrmse_scores, weights=val_sizes)
+        nrmse_score = np.average(nrmse_scores[1:], weights=val_sizes[1:])
         return nrmse_score
     return _fn
-
 
 def add_program_arguments(parser):
     parser.add_argument(
@@ -184,7 +179,10 @@ def add_program_arguments(parser):
         type=str,
         help="Embedding version to use in the form {n}d_{n}r"
     )
-
+    parser.add_argument(
+        "--without_glm",
+        action="store_true",
+    )
 
 if __name__ == '__main__':
     logging.getLogger("lightning.pytorch").setLevel(logging.CRITICAL)
@@ -194,7 +192,7 @@ if __name__ == '__main__':
     print("Program is run with ", args)
 
     pruner = optuna.pruners.PercentilePruner(75.0, n_warmup_steps=2, n_startup_trials=25) if args.prune else optuna.pruners.NopPruner()
-    study_name = f"{args.model_name}_{args.embedding_version}_test4y_timesplit_twoparams"
+    study_name = f"{args.model_name}_{args.embedding_version}_test4y_timesplit_fullparams"
     study = optuna.create_study(
         storage="postgresql://davidenicoli@localhost:5432/dla_results",
         study_name=study_name,
@@ -209,6 +207,6 @@ if __name__ == '__main__':
         os.makedirs(workdir)
 
     study.optimize(
-        objective(args.model_name, args.accelerator, args.max_epochs, args.patience, args.ds_dir, args.embedding_dir, workdir, args.n_devices, args.profile, args.log, seed=42, embedding_version=args.embedding_version),
+        objective(args.model_name, args.accelerator, args.max_epochs, args.patience, workdir, args.n_devices, args.profile, args.log, seed=0, embedding_version=args.embedding_version, with_glm=not args.without_glm),
         n_trials=args.n_trials
     )

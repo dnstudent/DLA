@@ -7,9 +7,9 @@ from torch import nn, Tensor
 from torch.nn.functional import mse_loss
 from torchmetrics.functional import mean_squared_error
 
-from .density_regressors import MonotonicRegressor, TheirDensityRegressor, TheirMonotonicRegressor
+from .density_regressors import FullDOutMonotonicRegressor, TheirDensityRegressor, TheirMonotonicRegressor, FullDOutDensityRegressor
 from .initializers import DummyInitializer, LastInitializer, AvgInitializer, FullInitializer, LSTMZ0Initializer
-from .temperature_regressors import TheirTemperatureRegressor
+from .temperature_regressors import TheirTemperatureRegressor, FullDOutTemperatureRegressor
 from .tools import physical_consistency, physical_inconsistency, reverse_tz_loss
 
 
@@ -50,7 +50,7 @@ class LitTZRegressor(L.LightningModule):
                  **kwargs
                  ):
         super().__init__()
-        self.tz_regressor = torch.compile(TZRegressor(initializer, density_regressor, temperature_regressor))
+        self.tz_regressor = TZRegressor(initializer, density_regressor, temperature_regressor)
         self.lr = lr
         self.weight_decay = weight_decay
         self.density_lambda = density_lambda
@@ -73,7 +73,7 @@ class LitTZRegressor(L.LightningModule):
         return {"t": t_score, "z": z_score, "monotonicity": physics_score, "sum": t_score + z_score}
 
     def forward(self, x, w, **kwargs):
-        x = nn.functional.pad(x, (self.x_padding, 0, 0, 0), mode="replicate")
+        x = nn.functional.pad(x, (0, 0, self.x_padding, 0), mode="replicate")
         t, z = self.tz_regressor(x, w)
         return t[:, self.x_padding:].clone(), z[:, self.x_padding:].clone()
 
@@ -114,15 +114,15 @@ class LitLSTM(LitTZRegressor):
 class TheirLSTM(LitLSTM):
     def __init__(self, n_input_features: int, *, lr: float = 1e-3, weight_decay: float = 0.05, density_lambda: float = 1.0, dropout_rate: float = 0.2, multiproc: bool):
         density_regressor = TheirDensityRegressor(n_input_features, dropout_rate)
-        temperature_regressor = TheirTemperatureRegressor(n_input_features)
+        temperature_regressor = FullDOutTemperatureRegressor(n_input_features, forward_size=5, dropout_rate=dropout_rate)
         super().__init__(density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay, density_lambda=density_lambda, multiproc=multiproc)
         self.save_hyperparameters()
 
 class ProperDOutLSTM(LitLSTM):
-    def __init__(self, n_input_features: int, *, lr: float, weight_decay: float,
+    def __init__(self, n_input_features: int, *, hidden_size: int = 8, forward_size: int = 5, lr: float, weight_decay: float,
                  density_lambda: float, dropout_rate: float, multiproc: bool):
-        density_regressor = TheirDensityRegressor(n_input_features, dropout_rate)
-        temperature_regressor = TheirTemperatureRegressor(n_input_features)
+        density_regressor = FullDOutDensityRegressor(n_input_features, hidden_size, forward_size, dropout_rate)
+        temperature_regressor = FullDOutTemperatureRegressor(n_input_features, forward_size, dropout_rate)
         super().__init__(density_regressor=density_regressor, temperature_regressor=temperature_regressor,
                          n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay,
                          density_lambda=density_lambda, multiproc=multiproc)
@@ -135,7 +135,7 @@ class LitPGL(LitTZRegressor):
                          temperature_regressor=temperature_regressor, n_input_features=n_input_features,
                          n_initial_features=None, x_padding=x_padding, lr=lr, weight_decay=weight_decay,
                          density_lambda=density_lambda, multiproc=multiproc)
-        self.physics_penalty_labda = physics_penalty_lambda
+        self.physics_penalty_lambda = physics_penalty_lambda
 
     def compute_losses(self, t_hat, z_hat, y):
         normal_losses = super().compute_losses(t_hat, z_hat, y)
@@ -147,20 +147,50 @@ class LitPGL(LitTZRegressor):
 class TheirPGL(LitPGL):
     def __init__(self, n_input_features: int, *, lr: float = 1e-3, weight_decay: float = 0.05,
                  density_lambda: float = 1.0, physics_penalty_lambda: float = 1.0, dropout_rate: float = 0.2, multiproc: bool):
-        density_regressor = TheirDensityRegressor(n_input_features, dropout_rate)
-        temperature_regressor = TheirTemperatureRegressor(n_input_features)
+        density_regressor = TheirDensityRegressor(n_input_features=n_input_features, dropout_rate=dropout_rate)
+        temperature_regressor = FullDOutTemperatureRegressor(n_input_features, forward_size=5, dropout_rate=dropout_rate)
         super().__init__(density_regressor=density_regressor, temperature_regressor=temperature_regressor,
                          n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay,
                          density_lambda=density_lambda, physics_penalty_lambda=physics_penalty_lambda, multiproc=multiproc)
         self.save_hyperparameters()
 
-class TheirPGA(LitLSTM):
-    def __init__(self, n_input_features: int, *, lr: float = 1e-3, weight_decay: float = 0.05,
-                 density_lambda: float = 1.0, dropout_rate: float = 0.2, multiproc: bool):
-        density_regressor = TheirMonotonicRegressor(n_input_features, dropout_rate)
-        temperature_regressor = TheirTemperatureRegressor(n_input_features)
+class ProperDOutPGL(LitPGL):
+    def __init__(self, n_input_features: int, *, hidden_size: int = 8, forward_size: int = 5, lr: float, weight_decay: float,
+                 density_lambda: float, physics_penalty_lambda: float, dropout_rate: float, multiproc: bool):
+        density_regressor = FullDOutDensityRegressor(n_input_features=n_input_features, hidden_size=hidden_size, forward_size=forward_size, dropout_rate=dropout_rate)
+        temperature_regressor = FullDOutTemperatureRegressor(n_input_features=n_input_features, forward_size=forward_size, dropout_rate=dropout_rate)
         super().__init__(density_regressor=density_regressor, temperature_regressor=temperature_regressor,
                          n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay,
+                         density_lambda=density_lambda, physics_penalty_lambda=physics_penalty_lambda, multiproc=multiproc)
+        self.save_hyperparameters()
+
+class TheirPGA(LitTZRegressor):
+    def __init__(self, n_input_features: int, *, lr: float = 1e-3, weight_decay: float = 0.05,
+                 density_lambda: float = 1.0, dropout_rate: float = 0.2, multiproc: bool):
+        density_regressor = TheirMonotonicRegressor(n_input_features=n_input_features, dropout_rate=dropout_rate)
+        temperature_regressor = TheirTemperatureRegressor(n_input_features=n_input_features)
+        super().__init__(initializer=FullInitializer(0.0), density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_initial_features=None,
+                         n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay,
+                         density_lambda=density_lambda, multiproc=multiproc)
+        self.save_hyperparameters()
+
+class ProperDOutPGA(LitTZRegressor):
+    def __init__(self, n_input_features: int, *, hidden_size: int = 8, forward_size: int = 5, lr: float, weight_decay: float,
+                 density_lambda: float, dropout_rate: float, multiproc: bool):
+        density_regressor = FullDOutMonotonicRegressor(n_input_features=n_input_features, hidden_size=hidden_size, forward_size=forward_size, dropout_rate=dropout_rate)
+        temperature_regressor = TheirTemperatureRegressor(n_input_features=n_input_features)
+        super().__init__(initializer=FullInitializer(0.0), density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_initial_features=None,
+                         n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay,
+                         density_lambda=density_lambda, multiproc=multiproc)
+        self.save_hyperparameters()
+
+class Z0PGA(LitTZRegressor):
+    def __init__(self, n_input_features: int, n_initial_features: int, *, hidden_size: int = 8, forward_size: int = 5, lr: float, weight_decay: float,
+                 density_lambda: float, dropout_rate: float, multiproc: bool):
+        density_regressor = FullDOutMonotonicRegressor(n_input_features=n_input_features, hidden_size=hidden_size, forward_size=forward_size, dropout_rate=dropout_rate)
+        temperature_regressor = TheirTemperatureRegressor(n_input_features=n_input_features)
+        super().__init__(initializer=LSTMZ0Initializer(n_weather_features=n_initial_features, hidden_size=hidden_size, dropout_rate=dropout_rate), density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_initial_features=n_initial_features,
+                         n_input_features=n_input_features, x_padding=0, lr=lr, weight_decay=weight_decay,
                          density_lambda=density_lambda, multiproc=multiproc)
         self.save_hyperparameters()
 

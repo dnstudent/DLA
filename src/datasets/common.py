@@ -1,10 +1,15 @@
+from os import PathLike
+from typing import Union
+from pathlib import Path
+
 import numpy as np
 import polars as pl
 import polars.selectors as cs
 import torch
 from torch.utils.data import TensorDataset
+from sklearn.model_selection import train_test_split
 
-from .tools import periodic_day, windowed, density
+from .tools import periodic_day, windowed, density, take_frac, normalize_inputs
 from .windowed import WindowedDataset
 
 
@@ -33,15 +38,15 @@ def make_autoencoder_split_dataset(autoencoder_dataset_maker):
     return _fn
 
 def make_spatiotemporal_dataset(full_table_loader, drivers_reader, depth_steps, time_steps):
-    def _fn(ds_dir, drivers_path, embedded_features_csv_path):
-        table = full_table_loader(ds_dir, embedded_features_csv_path)
+    def _fn(ds_dir: PathLike, drivers_path: PathLike, embedded_features_csv_path: PathLike, with_glm: bool):
+        table = full_table_loader(ds_dir, embedded_features_csv_path, with_glm)
         table = table.filter(pl.col("temp").is_not_null()).sort("date", "depth")
         drivers = (
             drivers_reader(drivers_path)
             .with_columns(date_components=periodic_day(pl.col("date")))
             .unnest("date_components")
             .select("date", features=pl.struct(cs.all()))
-            .group_by_dynamic(index_column="date", period="7d", every="1d", include_boundaries=False, label="right", closed="right")
+            .group_by_dynamic(index_column="date", period=f"{time_steps}d", every="1d", include_boundaries=False, label="right", closed="right")
             .agg(pl.col("features"), n=pl.len())
             .filter(pl.col("n") == time_steps)
             .drop("n")
@@ -62,15 +67,15 @@ def make_spatiotemporal_dataset(full_table_loader, drivers_reader, depth_steps, 
     return _fn
 
 def make_spatiotemporal_dataset_v2(full_table_loader, drivers_reader, depth_steps, time_steps):
-    def _fn(ds_dir, drivers_path, embedded_features_csv_path, T_squared, z_poly):
-        table = full_table_loader(ds_dir, embedded_features_csv_path)
+    def _fn(ds_dir, drivers_path, embedded_features_csv_path, with_glm, T_squared, z_poly):
+        table = full_table_loader(ds_dir, embedded_features_csv_path, with_glm)
         table = table.filter(pl.col("temp").is_not_null()).sort("date", "depth")
         drivers = (
             drivers_reader(drivers_path)
             .with_columns(date_components=periodic_day(pl.col("date")))
             .unnest("date_components")
             .select("date", features=pl.struct(cs.all()))
-            .group_by_dynamic(index_column="date", period="7d", every="1d", include_boundaries=False, label="right", closed="right")
+            .group_by_dynamic(index_column="date", period=f"{time_steps}d", every="1d", include_boundaries=False, label="right", closed="right")
             .agg(pl.col("features"), n=pl.len())
             .filter(pl.col("n") == time_steps)
             .drop("n")
@@ -108,7 +113,19 @@ def make_spatiotemporal_dataset_v2(full_table_loader, drivers_reader, depth_step
 #     return _fn
 
 def make_spatiotemporal_split_dataset(spatiotemporal_dataset_maker, split):
-    def _fn(ds_dir, drivers_path, embedded_features_csv_path, **kwargs):
-        x, w, y, t = spatiotemporal_dataset_maker(ds_dir, drivers_path, embedded_features_csv_path, **kwargs)
+    def _fn(ds_dir, drivers_path, embedded_features_csv_path, with_glm, **kwargs):
+        x, w, y, t = spatiotemporal_dataset_maker(ds_dir, drivers_path, embedded_features_csv_path, with_glm, **kwargs)
         return x[:split], x[split:], w[:split], w[split:], y[:split], y[split:], t[:split], t[split:]
     return _fn
+
+def prepare_their_data(x, w, y, x_test, w_test, y_test, train_size, val_size, shuffle_train):
+    # Taking the actual train dataset as a subset
+    x_train, w_train, y_train = take_frac(x, w, y, axis=0, frac=train_size, shuffle=True, random_state=42)
+    # Splitting in training and validation
+    x_train, x_val, w_train, w_val, y_train, y_val = train_test_split(x_train, w_train, y_train, test_size=val_size, random_state=42, shuffle=shuffle_train)
+    # Normalizing the datasets
+    (x_train, w_train, y_train), (x_val, w_val, y_val), (x_test, w_test, y_test), (x_means, w_means, y_means), (x_stds, w_stds, y_stds) = normalize_inputs(
+        [x_train, w_train, y_train], [x_val, w_val, y_val], [x_test, w_test, y_test])
+    # Padding the datasets
+    # x_train, x_val, x_test = their_edge_padding(x_train, x_val, x_test, pad_steps=pad_size, axis=1)
+    return x_train, x_val, x_test, w_train, w_val, w_test, y_train, y_val, y_test, y_means, y_stds

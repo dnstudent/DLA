@@ -11,15 +11,24 @@ def denorm(y, y_means, y_stds):
 
 def per_sample_test_rmse(y_true, y_pred_stochastic):
     # Mean on depths (axis=1)
-    test_rmse = np.sqrt(np.square(y_true[..., None] - y_pred_stochastic).mean(axis=1))
-    # Mean on test_size (axis=0) and sample_size (axis=-1)
-    ttm, dtm = test_rmse.mean(axis=(0, -1))
-    tts, dts = test_rmse.std(axis=(0, -1))
+    test_rmse = np.sqrt(np.square(y_true[..., None] - y_pred_stochastic).mean(axis=(1, -1)))
+    # Mean on test_size (axis=0) and statistic on sample_size (axis=-1)
+    ttm, dtm = test_rmse.mean(axis=0)
+    tts, dts = test_rmse.std(axis=0)
     return {"temperature": {"mean": ttm, "std": tts}, "density": {"mean": dtm, "std": dts}}
 
-def mean_test_rmse(y_true, y_pred_stochastic):
+def their_test_rmse(y_true, y_pred_stochastic):
     means = y_pred_stochastic.mean(axis=3)
+    stds = y_pred_stochastic.std(axis=3)
+
     test_rmse = np.sqrt(np.square(y_true - means).mean(axis=1))
+    ttm, dtm = test_rmse.mean(axis=0)
+    tts, dts = stds.mean(axis=(0,1))
+    return {"temperature": {"mean": ttm, "std": tts}, "density": {"mean": dtm, "std": dts}}
+
+
+def mean_test_rmse(y_true, y_pred_stochastic):
+    test_rmse = np.sqrt(np.square(y_true - y_pred_stochastic.mean(axis=3)).mean(axis=1))
     ttm, dtm = test_rmse.mean(axis=0)
     tts, dts = test_rmse.std(axis=0)
     return {"temperature": {"mean": ttm, "std": tts}, "density": {"mean": dtm, "std": dts}}
@@ -27,7 +36,7 @@ def mean_test_rmse(y_true, y_pred_stochastic):
 
 def test_rmse(y_true, y_pred_stochastic):
     return {"per_sample": per_sample_test_rmse(y_true, y_pred_stochastic),
-            "mean": mean_test_rmse(y_true, y_pred_stochastic)}
+            "mean": mean_test_rmse(y_true, y_pred_stochastic), "their": their_test_rmse(y_true, y_pred_stochastic)}
 
 
 def per_sample_physical_inconsistency(y_pred_stochastic):
@@ -55,6 +64,6 @@ def table_from_results(test_results):
         pl.from_dicts(test_results)
         .with_columns(prefix_nested("rmse"), prefix_nested("physical_inconsistency"))
         .unnest("rmse", "physical_inconsistency")
-        .with_columns(prefix_nested("rmse.per_sample"), prefix_nested("rmse.mean"))
-        .unnest("rmse.per_sample", "rmse.mean")
+        .with_columns(prefix_nested("rmse.per_sample"), prefix_nested("rmse.mean"), prefix_nested("rmse.their"))
+        .unnest("rmse.per_sample", "rmse.mean", "rmse.their")
     )

@@ -1,21 +1,38 @@
 import os
+from os import PathLike
 import logging
+from typing import List, Dict, Any, Optional
+from pathlib import Path
 import argparse
 
-import lightning as L
-import numpy as np
-import optuna
-import torch
-from lightning.pytorch.callbacks import EarlyStopping
-from lightning.pytorch.profilers import SimpleProfiler
-from lightning.pytorch.loggers import TensorBoardLogger
-from rich.progress import track
-from sklearn.model_selection import KFold
-from torch.utils import data as tdata
+logging.disable(logging.CRITICAL)
 
-from src.datasets.fcr import spatiotemporal_split_dataset
-from src.datasets.tools import normalize_inputs
+import optuna
+import lightning as L
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+import numpy as np
+import torch
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.profilers import SimpleProfiler
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold
+from torch.utils.data import TensorDataset, DataLoader
+from tqdm.notebook import tqdm
+from rich.progress import track
+
+from src.datasets.fcr import full_table, spatiotemporal_split_dataset, original_split_dataset
+from src.datasets.tools import normalize_inputs, take_frac
+from src.datasets.common import prepare_their_data
+from src.tools.paths import ds_dir, drivers_path, embedding_path
+from src.evaluation.analysis import test_rmse, test_physical_inconsistency, denorm, table_from_results
+from src.evaluation.plot import plot_mc_results
 from src.models import lstm
+from src.models.lstm import TheirPGA, TheirLSTM, TheirPGL, ProperDOutPGA, Z0PGA
+from src.models.training.v1 import train_or_load_best
+from src.models.mcdropout import MCSampler
+from src.models.tools import count_parameters
 from src.models.callbacks import BestScore
 
 
@@ -26,30 +43,25 @@ def define_hparams(trial: optuna.Trial, physics_penalty, ttoz_penalty):
     else:
         weight_decay = 0
     initial_lr = trial.suggest_float("initial_lr", 1e-5, 1e-1, log=True)
-    lr_decay_rate = trial.suggest_float("lr_decay_rate", 0.1, 1, log=True)
+    # lr_decay_rate = trial.suggest_float("lr_decay_rate", 0.1, 1, log=True)
     density_lambda = trial.suggest_float("density_lambda", 1e-2, 1e2, log=True)
     hparams = {
         "weight_decay": weight_decay,
         "initial_lr": initial_lr,
-        "lr_decay_rate": lr_decay_rate,
+        # "lr_decay_rate": lr_decay_rate,
         "density_lambda": density_lambda,
     }
     if physics_penalty:
         physics_penalty_lambda = trial.suggest_float("physics_penalty_lambda", 1e-2, 1e2, log=True)
         hparams |= {"physics_penalty_lambda": physics_penalty_lambda}
-    if ttoz_penalty:
-        ttoz_penalty_lambda = trial.suggest_float("ttoz_penalty_lambda", 1e-2, 1e2, log=True)
-        hparams |= {"ttoz_penalty_lambda": ttoz_penalty_lambda}
+    # if ttoz_penalty:
+    #     ttoz_penalty_lambda = trial.suggest_float("ttoz_penalty_lambda", 1e-2, 1e2, log=True)
+    #     hparams |= {"ttoz_penalty_lambda": ttoz_penalty_lambda}
     return hparams
 
-def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_dir, work_dir, n_devices, profile, log, test_size, shuffle_test, seed, embedding_version):
+def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_dir, work_dir, n_devices, profile, log, test_size, shuffle_test, seed, embedding_version, dataset, with_glm):
     L.seed_everything(seed)
-    if embedding_version:
-        embedding_path = os.path.join(embedding_dir, f"{embedding_version}.csv")
-    else:
-        embedding_path = None
-    drivers_dir = os.path.join(ds_dir, "FCR_2013_2018_Drivers.csv")
-    x, x_test, w, w_test, y, y_test, _, t_test = spatiotemporal_split_dataset(ds_dir, drivers_dir, embedding_path, test_size)
+    x, x_test, w, w_test, y, y_test, _, t_test = spatiotemporal_split_dataset(ds_dir(work_dir), drivers_path(work_dir, dataset), embedding_path(work_dir, dataset, embedding_version), with_glm)
     n_input_features = x.shape[-1]
     n_initial_features = w.shape[-1]
     multiproc = n_devices > 1
@@ -64,11 +76,11 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
             x_train, w_train, y_train = x[train_idxs], w[train_idxs], y[train_idxs]
             x_val, w_val, y_val = x[val_idxs], w[val_idxs], y[val_idxs]
             (x_train, w_train, y_train), (x_val, w_val, y_val), (x_means, w_means, y_means), (x_stds, w_stds, y_stds) = normalize_inputs([x_train, w_train, y_train], [x_val, w_val, y_val])
-            py_means, py_stds = torch.from_numpy(y_means), torch.from_numpy(y_stds)
-            pz_means, pz_stds = py_means[..., 1], py_stds[..., 1]
-            pt_means, pt_stds = py_means[..., 0], py_stds[..., 0]
-            train_ds = tdata.TensorDataset(torch.from_numpy(x_train), torch.from_numpy(w_train), torch.from_numpy(y_train))
-            val_ds = tdata.TensorDataset(torch.from_numpy(x_val), torch.from_numpy(w_val), torch.from_numpy(y_val))
+            # py_means, py_stds = torch.from_numpy(y_means), torch.from_numpy(y_stds)
+            # pz_means, pz_stds = py_means[..., 1], py_stds[..., 1]
+            # pt_means, pt_stds = py_means[..., 0], py_stds[..., 0]
+            train_ds = TensorDataset(torch.from_numpy(x_train), torch.from_numpy(w_train), torch.from_numpy(y_train))
+            val_ds = TensorDataset(torch.from_numpy(x_val), torch.from_numpy(w_val), torch.from_numpy(y_val))
             best_score_logger = BestScore(monitor="valid/score/t", mode="max")
             trainer = L.Trainer(
                 max_epochs=max_epochs,
@@ -84,12 +96,12 @@ def objective(model_name, accelerator, max_epochs, patience, ds_dir, embedding_d
                 log_every_n_steps=4,
                 profiler=SimpleProfiler(dirpath=work_dir, filename="perf_logs") if profile else None,
             )
-            model = model_class(n_input_features=n_input_features, **hparams, multiproc=multiproc, n_initial_features=n_initial_features, z_mean=pz_means, z_std=pz_stds, t_mean=pt_means, t_std=pt_stds, dropout_rate=0.2)
+            model = model_class(n_input_features=n_input_features, **hparams, multiproc=multiproc, dropout_rate=0.2)
 
             trainer.fit(
                 model,
-                train_dataloaders=tdata.DataLoader(train_ds, batch_size=20, shuffle=True),
-                val_dataloaders=tdata.DataLoader(val_ds, batch_size=128, shuffle=False),
+                train_dataloaders=DataLoader(train_ds, batch_size=20, shuffle=True),
+                val_dataloaders=DataLoader(val_ds, batch_size=128, shuffle=False),
             )
             # if trainer.logger:
             #     trainer.logger.log_hyperparams(params=hparams, metrics=trainer.callback_metrics)
@@ -181,9 +193,13 @@ def add_program_arguments(parser):
     parser.add_argument(
         "--embedding_version",
         action="store",
-        default=None,
+        default="orig",
         type=str,
-        help="Embedding version to use in the form {n}d_{n}r"
+        help="Embedding version to use in the form {n}d_{n}r or orig"
+    )
+    parser.add_argument(
+        "--without_glm",
+        action="store_true",
     )
 
 
@@ -212,6 +228,6 @@ if __name__ == '__main__':
     # embedding_version = args.embedding_version if args.embedding_version is not None else "latest"
 
     study.optimize(
-        objective(args.model_name, args.accelerator, args.max_epochs, args.patience, args.ds_dir, args.embedding_dir, workdir, args.n_devices, args.profile, args.log, 0.2, False, 42, args.embedding_version),
+        objective(args.model_name, args.accelerator, args.max_epochs, args.patience, args.ds_dir, args.embedding_dir, workdir, args.n_devices, args.profile, args.log, 0.2, False, 42, args.embedding_version, dataset="fcr", with_glm=not args.without_glm),
         n_trials=args.n_trials
     )
