@@ -1,6 +1,7 @@
 ### Custom
 *.sqlite3
 lightning_logs/
+logs/
 /PGA_LSTM
 /results
 /examples
