@@ -1,260 +1,164 @@
-from typing import Any, Optional, Tuple
+from typing import Type, Tuple, List
 
-import lightning as L
 import torch
-from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
-from torch import nn, Tensor
-from torch.nn.functional import mse_loss
-from torchmetrics.functional import mean_squared_error
+from torch import jit, Tensor, nn, Size
+from torch.nn import Parameter, functional as F
+from torch.nn.functional import dropout
 
-from .density_regressors import FullDOutMonotonicRegressor, TheirDensityRegressor, TheirMonotonicRegressor, FullDOutDensityRegressor
-from .initializers import DummyInitializer, LastInitializer, AvgInitializer, FullInitializer, LSTMZ0Initializer
-from .temperature_regressors import TheirTemperatureRegressor, FullDOutTemperatureRegressor
-from .tools import physical_consistency, physical_inconsistency, reverse_tz_loss
+from src.models.pga import MonotonicLSTMCell
+from src.models.tools import make_base_weight
 
 
-def configure_their_optimizer(density_regressor: nn.Module, temperature_regressor: nn.Module, lr, weight_decay):
-    first_linear_kernel = [param for name, param in temperature_regressor.named_parameters() if name == "first_linear.weight"]
-    other_params = [param for name, param in temperature_regressor.named_parameters() if name != "first_linear.weight"]
-    return torch.optim.Adam([
-            {"params": density_regressor.parameters()},
-            {"params": first_linear_kernel, "weight_decay": weight_decay},
-            {"params": other_params},
-        ], lr=lr, eps=1e-7, weight_decay=0.0)
-
-class TZRegressor(nn.Module):
-    def __init__(self, initializer, density_regressor, temperature_regressor):
+class MonotonicLSTM(jit.ScriptModule):
+    def __init__(
+        self, n_input_features: int, *, cell: Type[MonotonicLSTMCell], **kwargs
+    ):
         super().__init__()
-        self.initializer = initializer
-        self.density_regressor = density_regressor
-        self.temperature_regressor = temperature_regressor
+        self.cell = cell(n_input_features=n_input_features, **kwargs)
 
-    def forward(self, x: Tensor, w: Tensor) -> Tuple[Tensor, Tensor]:
-        z0_hat = self.initializer(w)
-        z = self.density_regressor(x, z0_hat)
-        t = self.temperature_regressor(x, z)
-        return t, z
+    @jit.script_method
+    def forward(
+        self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]
+    ) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
+        inputs = x.unbind(1)
+        outputs = jit.annotate(List[Tensor], [])
+        h0, c0, z0 = h
+        h = (h0.squeeze(0), c0.squeeze(0), z0.squeeze(0))
+        self.cell.init_dropouts(x.size(0))
+        for t in range(len(inputs)):
+            h = self.cell(inputs[t], h)
+            outputs += [h[2]]
+        hf, cf, zf = h
+        h = (hf.unsqueeze(0), cf.unsqueeze(0), zf.unsqueeze(0))
+        return torch.stack(outputs, dim=1), h
 
-class LitTZRegressor(L.LightningModule):
-    def __init__(self,
-                 initializer: nn.Module,
-                 density_regressor: nn.Module,
-                 temperature_regressor: nn.Module,
-                 n_input_features: int,
-                 n_initial_features: Optional[int],
-                 x_padding: int,
-                 lr: Optional[float],
-                 weight_decay: float,
-                 density_lambda: float,
-                 multiproc: bool,
-                 **kwargs
-                 ):
+
+class DropoutLSTMCell(jit.ScriptModule):
+    def __init__(
+        self,
+        n_input_features: int,
+        hidden_size: int,
+        input_dropout: float,
+        recurrent_dropout: float
+    ):
         super().__init__()
-        self.tz_regressor = TZRegressor(initializer, density_regressor, temperature_regressor)
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.density_lambda = density_lambda
-        self.multiproc = multiproc
-        self.n_input_features = n_input_features
-        self.n_initial_features = n_initial_features
-        self.x_padding = x_padding
+        self.n_input_features: int = n_input_features
+        self.hidden_size: int = hidden_size
+        self.input_dropout_rate: float = input_dropout
+        self.recurrent_dropout_rate: float = recurrent_dropout
 
-    def compute_losses(self, t_hat, z_hat, y):
-        t_loss = mse_loss(t_hat.squeeze(-1), y[..., 0])
-        z_loss = mse_loss(z_hat.squeeze(-1), y[..., 1])
-        return {"total": t_loss + self.density_lambda*z_loss, "t": t_loss, "z": z_loss}
+        self.weight_xi: Parameter = make_base_weight(self.n_input_features, self.hidden_size)
+        self.weight_xf: Parameter = make_base_weight(self.n_input_features, self.hidden_size)
+        self.weight_xc: Parameter = make_base_weight(self.n_input_features, self.hidden_size)
+        self.weight_xo: Parameter = make_base_weight(self.n_input_features, self.hidden_size)
+        self.weight_hi: Parameter = make_base_weight(self.hidden_size, self.hidden_size)
+        self.weight_hf: Parameter = make_base_weight(self.hidden_size, self.hidden_size)
+        self.weight_hc: Parameter = make_base_weight(self.hidden_size, self.hidden_size)
+        self.weight_ho: Parameter = make_base_weight(self.hidden_size, self.hidden_size)
+        self.bias_i: Parameter = make_base_weight(self.hidden_size)
+        self.bias_f: Parameter = make_base_weight(self.hidden_size)
+        self.bias_c: Parameter = make_base_weight(self.hidden_size)
+        self.bias_o: Parameter = make_base_weight(self.hidden_size)
 
-    @staticmethod
-    def compute_scores(t_hat, z_hat, y):
-        z_hat = z_hat.squeeze(-1)
-        t_score = -mean_squared_error(t_hat.squeeze(-1), y[..., 0], squared=False)
-        z_score = -mean_squared_error(z_hat, y[..., 1], squared=False)
-        physics_score = physical_consistency(z_hat, tol=1e-2, axis=1, agg_dims=(0,1)) # tol=1e-2 is approximately 1e-5 kg/m3, as the std is in the order of 1e-3
-        return {"t": t_score, "z": z_score, "monotonicity": physics_score, "sum": t_score + z_score}
+        self.x_dropout: Tensor = self._make_dropout_mask(
+            [4, self.n_input_features], self.input_dropout_rate
+        )
+        self.h_dropout: Tensor = self._make_dropout_mask(
+            [4, self.hidden_size], self.recurrent_dropout_rate
+        )
 
-    def forward(self, x, w, **kwargs):
-        x = nn.functional.pad(x, (0, 0, self.x_padding, 0), mode="replicate")
-        t, z = self.tz_regressor(x, w)
-        return t[:, self.x_padding:].clone(), z[:, self.x_padding:].clone()
+        self.init_recurrent_weights()
+        self.init_recurrent_biases()
 
-    def training_step(self, batch, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
-        x, w, y = batch
-        t_hat, z_hat = self(x, w)
-        losses = self.compute_losses(t_hat, z_hat, y)
-        self.log_dict({f"train/loss/{key}": value for key, value in losses.items()}, on_step=False, on_epoch=True, sync_dist=self.multiproc)
-        return losses["total"]
+    def init_recurrent_weights(self):
+        for weight in [
+            self.weight_xi,
+            self.weight_xf,
+            self.weight_xc,
+            self.weight_xo,
+            self.weight_hi,
+            self.weight_hf,
+            self.weight_hc,
+            self.weight_ho,
+        ]:
+            nn.init.orthogonal_(weight)
 
-    def validation_step(self, batch, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
-        x, w, y = batch
-        t_hat, z_hat = self(x, w)
-        losses = self.compute_losses(t_hat, z_hat, y)
-        scores = self.compute_scores(t_hat, z_hat, y)
-        self.log_dict({f"valid/loss/{key}": value for key, value in losses.items()} | {f"valid/score/{key}": value for key, value in scores.items()} | {"hp_metric": scores["t"]}, on_step=False, on_epoch=True, sync_dist=self.multiproc)
-        return losses["total"]
+    def init_recurrent_biases(self):
+        for bias in [self.bias_i, self.bias_c, self.bias_o]:
+            nn.init.zeros_(bias)
+        # Inizializzo il forget gate a 1. Sembra che sia preferibile
+        nn.init.ones_(self.bias_f)
 
-    def predict_step(self, batch, *args: Any, **kwargs: Any) -> Tensor:
-        return torch.cat(self(batch[0], batch[1]), dim=-1)
+    def _make_dropout_mask(self, shape: List[int], dropout_rate: float) -> Tensor:
+        return dropout(
+            torch.ones(Size(shape), dtype=self.weight_hi.dtype, device=self.weight_hi.device),
+            p=dropout_rate,
+            training=self.training,
+        )
 
-    def configure_optimizers(self) -> OptimizerLRScheduler:
-        first_linear_kernel = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
-                               name == "first_linear.weight"]
-        other_params = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
-                        name != "first_linear.weight"]
-        return torch.optim.Adam([
-            {"params": self.tz_regressor.initializer.parameters()},
-            {"params": self.tz_regressor.density_regressor.parameters()},
-            {"params": first_linear_kernel, "weight_decay": self.weight_decay},
-            {"params": other_params},
-        ], lr=self.lr, eps=1e-7, weight_decay=0.0)
+    def init_dropouts(self, batch_size: int):
+        self.x_dropout = self._make_dropout_mask(
+            [4 * batch_size, self.n_input_features], self.input_dropout_rate
+        )
+        self.h_dropout = self._make_dropout_mask(
+            [4 * batch_size, self.hidden_size], self.recurrent_dropout_rate
+        )
 
-class LitLSTM(LitTZRegressor):
-    def __init__(self, density_regressor: nn.Module, temperature_regressor: nn.Module, n_input_features: int, x_padding: int, lr: float, weight_decay: float, density_lambda: float, multiproc: bool):
-        super().__init__(initializer=DummyInitializer(), density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_input_features=n_input_features, n_initial_features=None, x_padding=x_padding, lr=lr, weight_decay=weight_decay, density_lambda=density_lambda, multiproc=multiproc)
+    @jit.script_method
+    def forward(
+        self, x: Tensor, h: Tuple[Tensor, Tensor]
+    ) -> Tuple[Tensor, Tensor]:
+        hp, cp = h
 
-class TheirLSTM(LitLSTM):
-    def __init__(self, n_input_features: int, *, lr: float = 1e-3, weight_decay: float = 0.05, density_lambda: float = 1.0, dropout_rate: float = 0.2, multiproc: bool):
-        density_regressor = TheirDensityRegressor(n_input_features, dropout_rate)
-        temperature_regressor = FullDOutTemperatureRegressor(n_input_features, forward_size=5, dropout_rate=dropout_rate)
-        super().__init__(density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay, density_lambda=density_lambda, multiproc=multiproc)
-        self.save_hyperparameters()
+        xi, xf, xc, xo = (torch.cat((x, x, x, x), dim=0) * self.x_dropout).chunk(4, dim=0)
+        hi, hf, hc, ho = (torch.cat((hp, hp, hp, hp), dim=0) * self.h_dropout).chunk(4, dim=0)
 
-class ProperDOutLSTM(LitLSTM):
-    def __init__(self, n_input_features: int, *, hidden_size: int = 8, forward_size: int = 5, lr: float, weight_decay: float,
-                 density_lambda: float, dropout_rate: float, multiproc: bool):
-        density_regressor = FullDOutDensityRegressor(n_input_features, hidden_size, forward_size, dropout_rate)
-        temperature_regressor = FullDOutTemperatureRegressor(n_input_features, forward_size, dropout_rate)
-        super().__init__(density_regressor=density_regressor, temperature_regressor=temperature_regressor,
-                         n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay,
-                         density_lambda=density_lambda, multiproc=multiproc)
-        self.save_hyperparameters()
+        It = (
+            xi.mm(self.weight_xi)
+            + hi.mm(self.weight_hi)
+            + self.bias_i
+        )
+        Ft = (
+            xf.mm(self.weight_xf)
+            + hf.mm(self.weight_hf)
+            + self.bias_f
+        )
+        Ct = (
+            xc.mm(self.weight_xc)
+            + hc.mm(self.weight_hc)
+            + self.bias_c
+        )
+        Ot = (
+            xo.mm(self.weight_xo)
+            + ho.mm(self.weight_ho)
+            + self.bias_o
+        )
 
-class LitPGL(LitTZRegressor):
-    def __init__(self, density_regressor: nn.Module, temperature_regressor: nn.Module, n_input_features: int,
-                 x_padding: int, lr: float, weight_decay: float, density_lambda: float, physics_penalty_lambda: float, multiproc: bool):
-        super().__init__(initializer=DummyInitializer(), density_regressor=density_regressor,
-                         temperature_regressor=temperature_regressor, n_input_features=n_input_features,
-                         n_initial_features=None, x_padding=x_padding, lr=lr, weight_decay=weight_decay,
-                         density_lambda=density_lambda, multiproc=multiproc)
-        self.physics_penalty_lambda = physics_penalty_lambda
+        It = F.hardsigmoid(It)
+        Ft = F.hardsigmoid(Ft)
+        ct = Ft * cp.squeeze(0) + It * torch.tanh(Ct)
+        Ot = F.hardsigmoid(Ot)
+        ht = Ot * torch.tanh(ct)
+        return ht, ct
 
-    def compute_losses(self, t_hat, z_hat, y):
-        normal_losses = super().compute_losses(t_hat, z_hat, y)
-        monotonicity_physics_loss = physical_inconsistency(z_hat.squeeze(-1), tol=1e-2, axis=1, agg_dims=(0,1))
-        normal_losses["monotonicity"] = monotonicity_physics_loss
-        normal_losses["total"] += self.physics_penalty_lambda * normal_losses["monotonicity"]
-        return normal_losses
 
-class TheirPGL(LitPGL):
-    def __init__(self, n_input_features: int, *, lr: float = 1e-3, weight_decay: float = 0.05,
-                 density_lambda: float = 1.0, physics_penalty_lambda: float = 1.0, dropout_rate: float = 0.2, multiproc: bool):
-        density_regressor = TheirDensityRegressor(n_input_features=n_input_features, dropout_rate=dropout_rate)
-        temperature_regressor = FullDOutTemperatureRegressor(n_input_features, forward_size=5, dropout_rate=dropout_rate)
-        super().__init__(density_regressor=density_regressor, temperature_regressor=temperature_regressor,
-                         n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay,
-                         density_lambda=density_lambda, physics_penalty_lambda=physics_penalty_lambda, multiproc=multiproc)
-        self.save_hyperparameters()
+class DropoutLSTM(jit.ScriptModule):
+    def __init__(self, n_input_features: int, hidden_size: int, dropout_rate: float):
+        super().__init__()
+        self.cell = DropoutLSTMCell(n_input_features=n_input_features, hidden_size=hidden_size, input_dropout=dropout_rate, recurrent_dropout=dropout_rate)
 
-class ProperDOutPGL(LitPGL):
-    def __init__(self, n_input_features: int, *, hidden_size: int = 8, forward_size: int = 5, lr: float, weight_decay: float,
-                 density_lambda: float, physics_penalty_lambda: float, dropout_rate: float, multiproc: bool):
-        density_regressor = FullDOutDensityRegressor(n_input_features=n_input_features, hidden_size=hidden_size, forward_size=forward_size, dropout_rate=dropout_rate)
-        temperature_regressor = FullDOutTemperatureRegressor(n_input_features=n_input_features, forward_size=forward_size, dropout_rate=dropout_rate)
-        super().__init__(density_regressor=density_regressor, temperature_regressor=temperature_regressor,
-                         n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay,
-                         density_lambda=density_lambda, physics_penalty_lambda=physics_penalty_lambda, multiproc=multiproc)
-        self.save_hyperparameters()
-
-class TheirPGA(LitTZRegressor):
-    def __init__(self, n_input_features: int, *, lr: float = 1e-3, weight_decay: float = 0.05,
-                 density_lambda: float = 1.0, dropout_rate: float = 0.2, multiproc: bool):
-        density_regressor = TheirMonotonicRegressor(n_input_features=n_input_features, dropout_rate=dropout_rate)
-        temperature_regressor = TheirTemperatureRegressor(n_input_features=n_input_features)
-        super().__init__(initializer=FullInitializer(0.0), density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_initial_features=None,
-                         n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay,
-                         density_lambda=density_lambda, multiproc=multiproc)
-        self.save_hyperparameters()
-
-class ProperDOutPGA(LitTZRegressor):
-    def __init__(self, n_input_features: int, *, hidden_size: int = 8, forward_size: int = 5, lr: float, weight_decay: float,
-                 density_lambda: float, dropout_rate: float, multiproc: bool):
-        density_regressor = FullDOutMonotonicRegressor(n_input_features=n_input_features, hidden_size=hidden_size, forward_size=forward_size, dropout_rate=dropout_rate)
-        temperature_regressor = TheirTemperatureRegressor(n_input_features=n_input_features)
-        super().__init__(initializer=FullInitializer(0.0), density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_initial_features=None,
-                         n_input_features=n_input_features, x_padding=10, lr=lr, weight_decay=weight_decay,
-                         density_lambda=density_lambda, multiproc=multiproc)
-        self.save_hyperparameters()
-
-class Z0PGA(LitTZRegressor):
-    def __init__(self, n_input_features: int, n_initial_features: int, *, hidden_size: int = 8, forward_size: int = 5, lr: float, weight_decay: float,
-                 density_lambda: float, dropout_rate: float, multiproc: bool):
-        density_regressor = FullDOutMonotonicRegressor(n_input_features=n_input_features, hidden_size=hidden_size, forward_size=forward_size, dropout_rate=dropout_rate)
-        temperature_regressor = TheirTemperatureRegressor(n_input_features=n_input_features)
-        super().__init__(initializer=LSTMZ0Initializer(n_weather_features=n_initial_features, hidden_size=hidden_size, dropout_rate=dropout_rate), density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_initial_features=n_initial_features,
-                         n_input_features=n_input_features, x_padding=0, lr=lr, weight_decay=weight_decay,
-                         density_lambda=density_lambda, multiproc=multiproc)
-        self.save_hyperparameters()
-
-# class PGAZ0Last(LitPGA):
-#     """PGA con regressor per stato iniziale
-#     """
-#     def __init__(self, n_input_features: int, n_initial_features: int, x_padding: int, lr: float, lr_decay_rate: float, weight_decay: float, density_lambda: float, dropout_rate: float, multiproc: bool, hidden_size: int = 8, forward_size: int = 5, initializer=None, **kwargs):
-#         if initializer is None:
-#             initializer = LastInitializer(n_initial_features, forward_size, dropout_rate)
-#         super().__init__(initializer, n_input_features, n_initial_features, x_padding, lr, lr_decay_rate, weight_decay, hidden_size, forward_size, density_lambda, dropout_rate, multiproc)
-#         self.save_hyperparameters(ignore=["initializer"])
-#
-# class PGAZ0Avg(LitPGA):
-#     """PGA con regressor per stato iniziale
-#     """
-#     def __init__(self, n_input_features: int, n_initial_features: int, x_padding: int, lr: float, lr_decay_rate: float, weight_decay: float, density_lambda: float, dropout_rate: float, multiproc: bool, hidden_size: int = 8, forward_size: int = 5, initializer=None, **kwargs):
-#         if initializer is None:
-#             initializer = AvgInitializer(n_initial_features, forward_size, dropout_rate)
-#         super().__init__(initializer, n_input_features, n_initial_features, x_padding, lr, lr_decay_rate, weight_decay, hidden_size, forward_size, density_lambda, dropout_rate, multiproc)
-#         self.save_hyperparameters(ignore=["initializer"])
-#
-# class PGAZ0RNN(LitPGA):
-#     """PGA con regressor per stato iniziale
-#     """
-#     def __init__(self, n_input_features: int, n_initial_features: int, x_padding: int, lr: float, lr_decay_rate: float, weight_decay: float, density_lambda: float, dropout_rate: float, multiproc: bool, hidden_size_initial: int = 5, hidden_size_density: int = 8, forward_size: int = 5, initializer=None, **kwargs):
-#         if initializer is None:
-#             initializer = LSTMZ0Initializer(n_initial_features, hidden_size_initial, dropout_rate)
-#         super().__init__(initializer, n_input_features, n_initial_features, x_padding, lr, lr_decay_rate, weight_decay, hidden_size_density, forward_size, density_lambda, dropout_rate, multiproc)
-#         self.save_hyperparameters(ignore=["initializer"])
-#
-# class PGATtoZLoss(LitPGA):
-#     """PGA con loss extra
-#     """
-#     def __init__(self,
-#                  z_mean: Tensor, z_std: Tensor,
-#                  t_mean: Tensor, t_std: Tensor,
-#                  n_input_features: int,
-#                  n_initial_features: Optional[int],
-#                  x_padding: int,
-#                  lr: float,
-#                  lr_decay_rate: float,
-#                  ttoz_penalty_lambda: float,
-#                  weight_decay: float,
-#                  density_lambda: float,
-#                  dropout_rate: float,
-#                  multiproc: bool,
-#                  initializer: Optional[nn.Module] = None,
-#                  hidden_size: int=8,
-#                  forward_size: int=5,
-#                  **kwargs
-#                  ):
-#         if not initializer:
-#             initializer = AvgInitializer(n_initial_features, forward_size, dropout_rate)
-#         super().__init__(initializer, n_input_features, x_padding, n_initial_features, lr, lr_decay_rate, weight_decay, hidden_size, forward_size, density_lambda, dropout_rate, multiproc)
-#         self.ttoz_penalty_lambda = ttoz_penalty_lambda
-#         self.t_mean = t_mean
-#         self.t_std = t_std
-#         self.z_mean = z_mean
-#         self.z_std = z_std
-#         self.save_hyperparameters(ignore=["initializer"])
-#
-#     def compute_losses(self, t_hat, z_hat, y):
-#         normal_losses = super().compute_losses(t_hat, z_hat, y)
-#         ttoz_physics_loss = reverse_tz_loss(t_hat.squeeze(-1), z_hat.squeeze(-1), self.z_mean, self.z_std, self.t_mean, self.t_std)
-#         normal_losses["ttoz"] = ttoz_physics_loss
-#         normal_losses["total"] += self.ttoz_penalty_lambda * ttoz_physics_loss
-#         return normal_losses
+    @jit.script_method
+    def forward(
+        self, x: Tensor, h: Tuple[Tensor, Tensor]
+    ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+        inputs = x.unbind(1)
+        outputs = jit.annotate(List[Tensor], [])
+        h0, c0 = h
+        h = (h0.squeeze(0), c0.squeeze(0))
+        self.cell.init_dropouts(x.size(0))
+        for t in range(len(inputs)):
+            h = self.cell(inputs[t], h)
+            outputs += [h[0]]
+        hf, cf = h
+        h = (hf.unsqueeze(0), cf.unsqueeze(0))
+        return torch.stack(outputs, dim=1), h

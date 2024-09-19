@@ -10,8 +10,8 @@ from .analysis import table_from_results
 def plot_stochastic(z, sample: np.ndarray, label, ax):
     std = sample.std(axis=-1)
     mean = sample.mean(axis=-1)
-    ax.fill_betweenx(z, mean - 2 * std, mean + 2 * std, color="cyan")
-    ax.plot(mean, z, label=label, color="blue")
+    ax.fill_betweenx(z, mean - 2 * std, mean + 2 * std, color="lightsteelblue")
+    ax.plot(mean, z, label=label, color="cornflowerblue")
 
 def plot_samples(z, samples: np.ndarray, label, ax):
     ax.plot(samples, z, label=label)

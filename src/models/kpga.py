@@ -15,8 +15,7 @@ from keras.src.layers.rnn.rnn import RNN
 from keras.src.ops import OnesLike
 from keras.src.ops import Operation
 from keras import KerasTensor
-from tensorflow import float32
-
+import numpy as np
 
 # class Ones(Operation):
 #     def call(self, shape, dtype=None):
@@ -84,7 +83,7 @@ class MonotonicLSTMCell(Layer, DropoutRNNCell):
             from the previous time step.
         training: Python boolean indicating whether the layer should behave in
             training mode or in inference mode. Only relevant when `dropout` or
-            `recurrent_dropout` is used.
+            `input_dropout_rate` is used.
 
     Example:
 
@@ -167,11 +166,12 @@ class MonotonicLSTMCell(Layer, DropoutRNNCell):
         # Custom variables
         self.dense_units = dense_units
         self.direction = direction
+        self.rectifier_activation = activations.get(rectifier_activation)
 
         # Custom weights
         self.delta_net_1 = keras.layers.Dense(
             self.dense_units,
-            activation=rectifier_activation,
+            activation=self.rectifier_activation,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -182,7 +182,7 @@ class MonotonicLSTMCell(Layer, DropoutRNNCell):
         )
         self.delta_net_2 = keras.layers.Dense(
             self.dense_units,
-            activation=rectifier_activation,
+            activation=self.rectifier_activation,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -259,9 +259,9 @@ class MonotonicLSTMCell(Layer, DropoutRNNCell):
         else:
             self.bias = None
 
-        self.delta_net_1.build(input_shape[:-1] + (self.units,))
-        self.delta_net_2.build(input_shape[:-1] + (self.dense_units,))
-        self.delta_net_out.build(input_shape[:-1] + (self.dense_units,))
+        # self.delta_net_1.build(input_shape[:-1] + (self.units,))
+        # self.delta_net_2.build(input_shape[:-1] + (self.dense_units,))
+        # self.delta_net_out.build(input_shape[:-1] + (self.dense_units,))
 
         self.built = True
 
@@ -336,6 +336,7 @@ class MonotonicLSTMCell(Layer, DropoutRNNCell):
         self._rectifier_dropout_masks = None
 
     def call(self, inputs, states, training=False):
+        # training = False
         h_tm1 = states[0]  # previous memory state
         c_tm1 = states[1]  # previous carry state
         m_tm1 = states[2]  # previous monotonic value
@@ -382,9 +383,9 @@ class MonotonicLSTMCell(Layer, DropoutRNNCell):
 
             c, o = self._compute_carry_and_output(x, h_tm1, c_tm1, (m_tm1_i, m_tm1_f, m_tm1_c, m_tm1_o))
         else:
-            z = ops.matmul(inputs, self.kernel)
+            z = ops.matmul(inputs, self.kernel) + ops.matmul(h_tm1, self.recurrent_kernel) + ops.matmul(m_tm1, self.z_kernel)
 
-            z += (ops.matmul(h_tm1, self.recurrent_kernel) + ops.matmul(m_tm1, self.z_kernel))
+            # z += (ops.matmul(h_tm1, self.recurrent_kernel) + ops.matmul(m_tm1, self.z_kernel))
             if self.use_bias:
                 z += self.bias
 
@@ -393,16 +394,16 @@ class MonotonicLSTMCell(Layer, DropoutRNNCell):
 
         h = o * self.activation(c)
 
-        delta = self.delta_net_1.call(h, training=training)
+        delta = self.delta_net_1(h)
         r_masks = self.get_rectifier_dropout_masks(delta)
         if training and 0.0 < self.rectifier_dropout < 1.0:
             delta = delta * r_masks[0]
 
-        delta = self.delta_net_2.call(delta, training=training)
+        delta = self.delta_net_2(delta)
         if training and 0.0 < self.rectifier_dropout < 1.0:
             delta = delta * r_masks[1]
 
-        delta = self.delta_net_out.call(delta, training=training)
+        delta = self.delta_net_out(delta)
         m = m_tm1 + delta
 
         return m, [h, c, m]
@@ -414,6 +415,7 @@ class MonotonicLSTMCell(Layer, DropoutRNNCell):
             "direction": self.direction,
             "activation": activations.serialize(self.activation),
             "recurrent_activation": activations.serialize(self.recurrent_activation),
+            "rectifier_activation": activations.serialize(self.rectifier_activation),
             "use_bias": self.use_bias,
             "unit_forget_bias": self.unit_forget_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
@@ -426,7 +428,7 @@ class MonotonicLSTMCell(Layer, DropoutRNNCell):
             "recurrent_constraint": constraints.serialize(self.recurrent_constraint),
             "bias_constraint": constraints.serialize(self.bias_constraint),
             "dropout": self.dropout,
-            "recurrent_dropout": self.recurrent_dropout,
+            "input_dropout_rate": self.recurrent_dropout,
             "rectifier_dropout": self.rectifier_dropout,
             "seed": self.seed,
         }
@@ -450,7 +452,7 @@ class MonotonicLSTM(RNN):
 
     1. `activation` == `tanh`
     2. `recurrent_activation` == `sigmoid`
-    3. `dropout` == 0 and `recurrent_dropout` == 0
+    3. `dropout` == 0 and `input_dropout_rate` == 0
     4. `unroll` is `False`
     5. `use_bias` is `True`
     6. Inputs, if use masking, are strictly right-padded.
@@ -547,7 +549,7 @@ class MonotonicLSTM(RNN):
         training: Python boolean indicating whether the layer should behave in
             training mode or in inference mode. This argument is passed to the
             cell when calling it. This is only relevant if `dropout` or
-            `recurrent_dropout` is used  (optional). Defaults to `None`.
+            `input_dropout_rate` is used  (optional). Defaults to `None`.
         initial_state: List of initial state tensors to be passed to the first
             call of the cell (optional, `None` causes creation
             of zero-filled initial state tensors). Defaults to `None`.
@@ -559,7 +561,8 @@ class MonotonicLSTM(RNN):
         dense_units: int,
         direction="increasing",
         activation="tanh",
-        recurrent_activation="sigmoid",
+        recurrent_activation="hard_sigmoid",
+        rectifier_activation="relu",
         use_bias=True,
         kernel_initializer="glorot_uniform",
         recurrent_initializer="orthogonal",
@@ -576,7 +579,7 @@ class MonotonicLSTM(RNN):
         recurrent_dropout=0.0,
         rectifier_dropout=0.0,
         seed=None,
-        return_sequences=False,
+        return_sequences=True,
         return_state=False,
         go_backwards=False,
         stateful=False,
@@ -590,6 +593,7 @@ class MonotonicLSTM(RNN):
             direction,
             activation=activation,
             recurrent_activation=recurrent_activation,
+            rectifier_activation=rectifier_activation,
             use_bias=use_bias,
             kernel_initializer=kernel_initializer,
             unit_forget_bias=unit_forget_bias,
@@ -606,7 +610,7 @@ class MonotonicLSTM(RNN):
             rectifier_dropout=rectifier_dropout,
             dtype=kwargs.get("dtype", None),
             trainable=kwargs.get("trainable", True),
-            name="lstm_cell",
+            name="monotoniclstm_cell",
             seed=seed,
             implementation=kwargs.pop("implementation", 2),
         )
@@ -732,7 +736,7 @@ class MonotonicLSTM(RNN):
 
     @property
     def recurrent_dropout(self):
-        return self.cell.recurrent_dropout
+        return self.cell.input_dropout_rate
 
     @property
     def rectifier_dropout(self):
@@ -758,7 +762,7 @@ class MonotonicLSTM(RNN):
             "recurrent_constraint": constraints.serialize(self.recurrent_constraint),
             "bias_constraint": constraints.serialize(self.bias_constraint),
             "dropout": self.dropout,
-            "recurrent_dropout": self.recurrent_dropout,
+            "input_dropout_rate": self.recurrent_dropout,
             "rectifier_dropout": self.rectifier_dropout,
             "seed": self.cell.seed,
         }

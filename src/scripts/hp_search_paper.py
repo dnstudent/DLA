@@ -18,7 +18,7 @@ from torch.utils import data as tdata
 
 from src.datasets.fcr import spatiotemporal_split_dataset
 from src.datasets.tools import normalize_inputs
-from src.models import lstm
+from src.models import regressors
 from src.tools.paths import ds_dir, drivers_path, embedding_path
 
 
@@ -40,7 +40,9 @@ def define_hparams(trial: optuna.Trial, physics_penalty):
 def prepare_their_data(x, y, train_idxs, val_idxs) -> Tuple[tdata.Dataset, tdata.Dataset]:
     x_train, y_train = x[train_idxs], y[train_idxs]
     x_val, y_val = x[val_idxs], y[val_idxs]
-    (x_train, y_train), (x_val, y_val), _, _ = normalize_inputs([x_train, y_train], [x_val, y_val])
+    (x_train, y_train), (x_val, y_val), (_, y_means), (_, y_stds)  = normalize_inputs([x_train, y_train], [x_val, y_val])
+    y_train[..., 0] = y_train[..., 0]*y_stds[..., 0] + y_means[..., 0]
+    y_val[..., 0] = y_val[..., 0]*y_stds[..., 0] + y_means[..., 0]
 
     train_ds = tdata.TensorDataset(torch.from_numpy(x_train), torch.empty((len(x_train), 1, 1)),
                                    torch.from_numpy(y_train))
@@ -53,7 +55,7 @@ def objective(model_name, accelerator, max_epochs, patience, work_dir, n_devices
     x, _, _, _, y, _, _, _ = spatiotemporal_split_dataset(ds_dir("."), drivers_path(".", "fcr"), embedding_path(".", "fcr", embedding_version), with_glm)
     n_input_features = x.shape[-1]
     multiproc = n_devices > 1
-    model_class = getattr(lstm, model_name)
+    model_class = getattr(regressors, model_name)
     physics_penalty = "PGL" in model_name
     def _fn(trial: optuna.Trial):
         cv = TimeSeriesSplit(n_splits=4, gap=31)
@@ -78,11 +80,11 @@ def objective(model_name, accelerator, max_epochs, patience, work_dir, n_devices
                 gradient_clip_val=1,
                 gradient_clip_algorithm="norm"
             )
-            model = model_class(n_input_features=n_input_features,  multiproc=multiproc, dropout_rate=0.2, **hparams)
+            model = model_class(n_input_features=n_input_features,  multiproc=multiproc, dropout_rate=0.2, temperature_lambda=1.0, **hparams)
 
             trainer.fit(
                 model,
-                train_dataloaders=tdata.DataLoader(train_ds, batch_size=128, shuffle=True),
+                train_dataloaders=tdata.DataLoader(train_ds, batch_size=20, shuffle=True),
                 val_dataloaders=tdata.DataLoader(val_ds, batch_size=256, shuffle=False),
             )
 

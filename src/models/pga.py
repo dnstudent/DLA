@@ -1,57 +1,94 @@
-from typing import Tuple, List, Union, Type
+from typing import Tuple, List
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor
+from torch import Tensor, Size
 from torch import jit
 from torch import nn
 from torch.nn.functional import relu, dropout
-from torch.nn.parameter import Parameter
+
+from src.models.tools import make_base_weight
 
 
-def gate_comp(x, weight_x, h, weight_h, z, weight_z, bias):
-    return torch.mm(x, weight_x) + torch.mm(h, weight_h) + torch.mm(z, weight_z) + bias
-
-class TheirMonotonicLSTMCell(nn.Module):
-    def __init__(self, input_size: int, dropout_rate: float, **kwargs):
+class MonotonicLSTMCell(jit.ScriptModule):
+    def __init__(
+        self,
+        n_input_features: int,
+        output_size: int,
+        hidden_size: int,
+        forward_size: int,
+        input_dropout: float,
+        recurrent_dropout: float,
+        z_dropout: float,
+        forward_dropout: float,
+        **kwargs
+    ):
         super().__init__()
-        self.input_size = input_size
-        self.hidden_size = 8
-        self.forward_size = 5
-        self.dropout_rate = dropout_rate
+        self.n_input_features: int = n_input_features
+        self.output_size: int = output_size
+        self.hidden_size: int = hidden_size
+        self.forward_size: int = forward_size
+        self.input_dropout_rate: float = input_dropout
+        self.recurrent_dropout_rate: float = recurrent_dropout
+        self.z_dropout_rate: float = z_dropout
+        self.forward_dropout_rate: float = forward_dropout
 
-        self.weight_xi = Parameter(torch.empty(input_size, self.hidden_size))
-        self.weight_xf = Parameter(torch.empty(input_size, self.hidden_size))
-        self.weight_xc = Parameter(torch.empty(input_size, self.hidden_size))
-        self.weight_xo = Parameter(torch.empty(input_size, self.hidden_size))
-        self.weight_hi = Parameter(torch.empty(self.hidden_size, self.hidden_size))
-        self.weight_hf = Parameter(torch.empty(self.hidden_size, self.hidden_size))
-        self.weight_hc = Parameter(torch.empty(self.hidden_size, self.hidden_size))
-        self.weight_ho = Parameter(torch.empty(self.hidden_size, self.hidden_size))
-        self.weight_zi = Parameter(torch.empty(1, self.hidden_size))
-        self.weight_zf = Parameter(torch.empty(1, self.hidden_size))
-        self.weight_zc = Parameter(torch.empty(1, self.hidden_size))
-        self.weight_zo = Parameter(torch.empty(1, self.hidden_size))
-        self.bias_i = Parameter(torch.empty(self.hidden_size))
-        self.bias_f = Parameter(torch.empty(self.hidden_size))
-        self.bias_c = Parameter(torch.empty(self.hidden_size))
-        self.bias_o = Parameter(torch.empty(self.hidden_size))
+        self.weight_xi = make_base_weight(self.n_input_features, self.hidden_size)
+        self.weight_xf = make_base_weight(self.n_input_features, self.hidden_size)
+        self.weight_xc = make_base_weight(self.n_input_features, self.hidden_size)
+        self.weight_xo = make_base_weight(self.n_input_features, self.hidden_size)
+        self.weight_hi = make_base_weight(self.hidden_size, self.hidden_size)
+        self.weight_hf = make_base_weight(self.hidden_size, self.hidden_size)
+        self.weight_hc = make_base_weight(self.hidden_size, self.hidden_size)
+        self.weight_ho = make_base_weight(self.hidden_size, self.hidden_size)
+        self.weight_zi = make_base_weight(self.output_size, self.hidden_size)
+        self.weight_zf = make_base_weight(self.output_size, self.hidden_size)
+        self.weight_zc = make_base_weight(self.output_size, self.hidden_size)
+        self.weight_zo = make_base_weight(self.output_size, self.hidden_size)
+        self.bias_i = make_base_weight(self.hidden_size)
+        self.bias_f = make_base_weight(self.hidden_size)
+        self.bias_c = make_base_weight(self.hidden_size)
+        self.bias_o = make_base_weight(self.hidden_size)
         self.dense_1 = nn.Linear(self.hidden_size, self.forward_size)
         self.dense_2 = nn.Linear(self.forward_size, self.forward_size)
-        self.out = nn.Linear(self.forward_size, 1)
+        self.delta = nn.Sequential(
+            nn.Linear(self.forward_size, self.output_size), nn.ReLU()
+        )
 
-        self.dropout_x = None
-        self.dropout_z = None
-        self.dropout_1 = None
-        self.dropout_2 = None
+        self.x_dropout: Tensor = self._make_dropout_mask(
+            [4, self.n_input_features], self.input_dropout_rate
+        )
+        self.h_dropout: Tensor = self._make_dropout_mask(
+            [4, self.hidden_size], self.recurrent_dropout_rate
+        )
+        self.z_dropout: Tensor = self._make_dropout_mask([4, self.output_size], self.z_dropout_rate)
+        self.d1_dropout: Tensor = self._make_dropout_mask(
+            [1, self.forward_size], self.forward_dropout_rate
+        )
+        self.d2_dropout: Tensor = self._make_dropout_mask(
+            [1, self.forward_size], self.forward_dropout_rate
+        )
 
         self.init_recurrent_weights()
         self.init_recurrent_biases()
         self.init_sequential_params()
-        self.init_dropouts()
+        self.init_dropouts(1)
 
     def init_recurrent_weights(self):
-        for weight in [self.weight_xi, self.weight_xf, self.weight_xc, self.weight_xo, self.weight_hi, self.weight_hf, self.weight_hc, self.weight_ho, self.weight_zi, self.weight_zf, self.weight_zc, self.weight_zo]:
+        for weight in [
+            self.weight_xi,
+            self.weight_xf,
+            self.weight_xc,
+            self.weight_xo,
+            self.weight_hi,
+            self.weight_hf,
+            self.weight_hc,
+            self.weight_ho,
+            self.weight_zi,
+            self.weight_zf,
+            self.weight_zc,
+            self.weight_zo,
+        ]:
             nn.init.orthogonal_(weight)
 
     def init_recurrent_biases(self):
@@ -62,156 +99,94 @@ class TheirMonotonicLSTMCell(nn.Module):
 
     def init_sequential_params(self):
         def weights_init(m):
-            nn.init.xavier_uniform_(m.weight)
-            nn.init.zeros_(m.bias)
-        for layer in [self.dense_1, self.dense_2, self.out]:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+
+        for layer in [self.dense_1, self.dense_2]:
             weights_init(layer)
+        self.delta.apply(weights_init)
 
-    def init_dropouts(self):
-        self.dropout_x = dropout(torch.ones((4, self.input_size), dtype=self.weight_hi.dtype, device=self.weight_hi.device), p=self.dropout_rate, training=self.training)
-        self.dropout_z = dropout(torch.ones((4, 1), dtype=self.weight_hi.dtype, device=self.weight_hi.device), p=self.dropout_rate, training=self.training)
-        self.dropout_1 = dropout(torch.ones((1, self.forward_size), dtype=self.weight_hi.dtype, device=self.weight_hi.device), p=self.dropout_rate, training=self.training)
-        self.dropout_2 = dropout(torch.ones((1, self.forward_size), dtype=self.weight_hi.dtype, device=self.weight_hi.device), p=self.dropout_rate, training=self.training)
+    def _make_dropout_mask(self, shape: List[int], dropout_rate: float):
+        return dropout(
+            torch.ones(Size(shape), dtype=self.weight_hi.dtype, device=self.weight_hi.device),
+            p=dropout_rate,
+            training=self.training,
+        )
 
+    def init_dropouts(self, batch_size: int):
+        self.x_dropout = self._make_dropout_mask(
+            [4 * batch_size, self.n_input_features], self.input_dropout_rate
+        )
+        self.h_dropout = self._make_dropout_mask(
+            [4 * batch_size, self.hidden_size], self.recurrent_dropout_rate
+        )
+        self.z_dropout = self._make_dropout_mask([4 * batch_size, self.output_size], self.z_dropout_rate)
+        self.d1_dropout = self._make_dropout_mask(
+            [batch_size, self.forward_size], self.forward_dropout_rate
+        )
+        self.d2_dropout = self._make_dropout_mask(
+            [batch_size, self.forward_size], self.forward_dropout_rate
+        )
 
-    def forward(self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
+    @jit.script_method
+    def forward(
+        self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         hp, cp, zp = h
-        hp = hp.squeeze(0)
-        batch_size = x.size(0)
 
-        xi, xf, xc, xo = (x.repeat((4, 1)) * self.dropout_x.repeat_interleave(batch_size, dim=0, output_size=4*batch_size)).chunk(4, dim=0)
-        hi = hp.clone()
-        hf = hp.clone()
-        hc = hp.clone()
-        ho = hp.clone()
-        zi, zf, zc, zo = (zp.repeat((4, 1)) * self.dropout_z.repeat_interleave(batch_size, dim=0, output_size=4*batch_size)).chunk(4, dim=0)
+        xi, xf, xc, xo = (torch.cat((x, x, x, x), dim=0) * self.x_dropout).chunk(4, dim=0)
+        hi, hf, hc, ho = (torch.cat((hp, hp, hp, hp), dim=0) * self.h_dropout).chunk(4, dim=0)
+        zi, zf, zc, zo = (torch.cat((zp, zp, zp, zp), dim=0) * self.z_dropout).chunk(4, dim=0)
 
-        It = xi.mm(self.weight_xi) + hi.mm(self.weight_hi) + zi.mm(self.weight_zi) + self.bias_i
-        Ft = xf.mm(self.weight_xf) + hf.mm(self.weight_hf) + zf.mm(self.weight_zf) + self.bias_f
-        Ct = xc.mm(self.weight_xc) + hc.mm(self.weight_hc) + zc.mm(self.weight_zc) + self.bias_c
-        Ot = xo.mm(self.weight_xo) + ho.mm(self.weight_ho) + zo.mm(self.weight_zo) + self.bias_o
+        It = (
+            xi.mm(self.weight_xi)
+            + hi.mm(self.weight_hi)
+            + zi.mm(self.weight_zi)
+            + self.bias_i
+        )
+        Ft = (
+            xf.mm(self.weight_xf)
+            + hf.mm(self.weight_hf)
+            + zf.mm(self.weight_zf)
+            + self.bias_f
+        )
+        Ct = (
+            xc.mm(self.weight_xc)
+            + hc.mm(self.weight_hc)
+            + zc.mm(self.weight_zc)
+            + self.bias_c
+        )
+        Ot = (
+            xo.mm(self.weight_xo)
+            + ho.mm(self.weight_ho)
+            + zo.mm(self.weight_zo)
+            + self.bias_o
+        )
 
         It = F.hardsigmoid(It)
         Ft = F.hardsigmoid(Ft)
-        ct = Ft*cp.squeeze(0) + It*torch.tanh(Ct)
+        ct = Ft * cp.squeeze(0) + It * torch.tanh(Ct)
         Ot = F.hardsigmoid(Ot)
         ht = Ot * torch.tanh(ct)
         # Monotonicity-preserving steps
-        dt = relu(self.dense_1(ht))*self.dropout_1
-        dt = relu(self.dense_2(dt))*self.dropout_2
-        dt = relu(self.out(dt))
+        dt = relu(self.dense_1(ht)) * self.d1_dropout
+        dt = relu(self.dense_2(dt)) * self.d2_dropout
+        dt = self.delta(dt)
         zt = zp + dt
-        return zt, (ht, ct, zt)
-
-class MonotonicLSTMCell(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, **kwargs):
-        super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.forward_size = forward_size
-        self.dropout_rate = dropout_rate
-
-        self.weight_xi = Parameter(torch.empty(input_size, self.hidden_size))
-        self.weight_xf = Parameter(torch.empty(input_size, self.hidden_size))
-        self.weight_xc = Parameter(torch.empty(input_size, self.hidden_size))
-        self.weight_xo = Parameter(torch.empty(input_size, self.hidden_size))
-        self.weight_hi = Parameter(torch.empty(self.hidden_size, self.hidden_size))
-        self.weight_hf = Parameter(torch.empty(self.hidden_size, self.hidden_size))
-        self.weight_hc = Parameter(torch.empty(self.hidden_size, self.hidden_size))
-        self.weight_ho = Parameter(torch.empty(self.hidden_size, self.hidden_size))
-        self.weight_zi = Parameter(torch.empty(1, self.hidden_size))
-        self.weight_zf = Parameter(torch.empty(1, self.hidden_size))
-        self.weight_zc = Parameter(torch.empty(1, self.hidden_size))
-        self.weight_zo = Parameter(torch.empty(1, self.hidden_size))
-        self.bias_i = Parameter(torch.empty(self.hidden_size))
-        self.bias_f = Parameter(torch.empty(self.hidden_size))
-        self.bias_c = Parameter(torch.empty(self.hidden_size))
-        self.bias_o = Parameter(torch.empty(self.hidden_size))
-        self.dense_1 = nn.Linear(self.hidden_size, self.forward_size)
-        self.dense_2 = nn.Linear(self.forward_size, self.forward_size)
-        self.out = nn.Linear(self.forward_size, 1)
-
-        self.dropout_x = None
-        self.dropout_h = None
-        self.dropout_z = None
-        self.dropout_1 = None
-        self.dropout_2 = None
-
-        self.init_recurrent_weights()
-        self.init_recurrent_biases()
-        self.init_sequential_params()
-        self.init_dropouts()
-
-    def init_recurrent_weights(self):
-        for weight in [self.weight_xi, self.weight_xf, self.weight_xc, self.weight_xo, self.weight_hi, self.weight_hf, self.weight_hc, self.weight_ho, self.weight_zi, self.weight_zf, self.weight_zc, self.weight_zo]:
-            nn.init.orthogonal_(weight)
-
-    def init_recurrent_biases(self):
-        for bias in [self.bias_i, self.bias_c, self.bias_o]:
-            nn.init.zeros_(bias)
-        # Inizializzo il forget gate a 1. Sembra che sia preferibile
-        nn.init.ones_(self.bias_f)
-
-    def init_sequential_params(self):
-        def weights_init(m):
-            nn.init.xavier_uniform_(m.weight)
-            nn.init.zeros_(m.bias)
-        for layer in [self.dense_1, self.dense_2, self.out]:
-            weights_init(layer)
-
-    def init_dropouts(self):
-        self.dropout_x = dropout(torch.ones((4, self.input_size), dtype=self.weight_hi.dtype, device=self.weight_hi.device), p=self.dropout_rate, training=self.training)
-        self.dropout_h = dropout(torch.ones((4, self.hidden_size), dtype=self.weight_hi.dtype, device=self.weight_hi.device), p=self.dropout_rate, training=self.training)
-        self.dropout_z = dropout(torch.ones((4, 1), dtype=self.weight_hi.dtype, device=self.weight_hi.device), p=self.dropout_rate, training=self.training)
-        self.dropout_1 = dropout(torch.ones((1, self.forward_size), dtype=self.weight_hi.dtype, device=self.weight_hi.device), p=self.dropout_rate, training=self.training)
-        self.dropout_2 = dropout(torch.ones((1, self.forward_size), dtype=self.weight_hi.dtype, device=self.weight_hi.device), p=self.dropout_rate, training=self.training)
+        return ht, ct, zt
 
 
-    def forward(self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
-        hp, cp, zp = h
-        hp = hp.squeeze(0)
-        batch_size = x.size(0)
-
-        xi, xf, xc, xo = (x.repeat((4, 1)) * self.dropout_x.repeat_interleave(batch_size, dim=0, output_size=4*batch_size)).chunk(4, dim=0)
-        hi, hf, hc, ho = (hp.repeat((4, 1)) * self.dropout_h.repeat_interleave(batch_size, dim=0, output_size=4*batch_size)).chunk(4, dim=0)
-        zi, zf, zc, zo = (zp.repeat((4, 1)) * self.dropout_z.repeat_interleave(batch_size, dim=0, output_size=4*batch_size)).chunk(4, dim=0)
-
-        It = xi.mm(self.weight_xi) + hi.mm(self.weight_hi) + zi.mm(self.weight_zi) + self.bias_i
-        Ft = xf.mm(self.weight_xf) + hf.mm(self.weight_hf) + zf.mm(self.weight_zf) + self.bias_f
-        Ct = xc.mm(self.weight_xc) + hc.mm(self.weight_hc) + zc.mm(self.weight_zc) + self.bias_c
-        Ot = xo.mm(self.weight_xo) + ho.mm(self.weight_ho) + zo.mm(self.weight_zo) + self.bias_o
-
-        It = F.hardsigmoid(It)
-        Ft = F.hardsigmoid(Ft)
-        ct = Ft*cp.squeeze(0) + It*torch.tanh(Ct)
-        Ot = F.hardsigmoid(Ot)
-        ht = Ot * torch.tanh(ct)
-        # Monotonicity-preserving steps
-        dt = relu(self.dense_1(ht))*self.dropout_1
-        dt = relu(self.dense_2(dt))*self.dropout_2
-        dt = relu(self.out(dt))
-        zt = zp + dt
-        return zt, (ht, ct, zt)
-
-class MonotonicLSTM(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, cell: Union[Type[TheirMonotonicLSTMCell], Type[MonotonicLSTMCell]]):
-        super().__init__()
-        self.cell = cell(input_size=input_size, hidden_size=hidden_size, forward_size=forward_size, dropout_rate=dropout_rate)
-
-    def forward(self, x: Tensor, h: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
-        inputs = x.unbind(1) # dim=1 is the timestep in batch_first=True. Probably batch_first=False (dim=0) is faster
-        outputs = jit.annotate(List[Tensor], [])
-        self.cell.init_dropouts()
-        for t in range(len(inputs)):
-            output, h = self.cell(inputs[t], h)
-            outputs += [output]
-        return torch.stack(outputs, dim=1), h
-
-# class MonotonicLSTM(nn.Module):
-#     def __init__(self, input_size: int, hidden_size: int, forward_size: int, dropout_rate: float, cell: Union[TheirMonotonicLSTMCell, MonotonicLSTMCell]):
-#         super().__init__()
-#         self.monotonic_layer = MonotonicLSTMLayer(input_size, hidden_size, forward_size, dropout_rate, cell)
-#
-#     # @jit.script_method
-#     def forward(self, x: Tensor, h0: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor]]:
-#         return self.monotonic_layer(x, h0)
+class TheirMonotonicLSTMCell(MonotonicLSTMCell):
+    def __init__(self, n_input_features: int, dropout: float, **kwargs):
+        super().__init__(
+            n_input_features=n_input_features,
+            output_size=1,
+            hidden_size=8,
+            forward_size=5,
+            input_dropout=dropout,
+            recurrent_dropout=0.0,
+            z_dropout=dropout,
+            forward_dropout=dropout,
+            **kwargs
+        )

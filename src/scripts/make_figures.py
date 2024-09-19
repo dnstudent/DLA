@@ -104,7 +104,7 @@ if __name__ == '__main__':
 
     hparams = {}
     for model_class in model_labels:
-        hparams[model_class] = {"lr": 1e-3, "density_lambda": 1.0, "weight_decay": 0.05, "dropout_rate": 0.2, "multiproc": False}
+        hparams[model_class] = {"lr": 1e-3, "density_lambda": 1.0, "weight_decay": 0.05, "forward_dropout_rate": 0.2, "multiproc": False}
     hparams["TheirPGL"]["physics_penalty_lambda"] = 1.0
 
     wd = Path(args.wd)

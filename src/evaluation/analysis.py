@@ -11,10 +11,10 @@ def denorm(y, y_means, y_stds):
 
 def per_sample_test_rmse(y_true, y_pred_stochastic):
     # Mean on depths (axis=1)
-    test_rmse = np.sqrt(np.square(y_true[..., None] - y_pred_stochastic).mean(axis=(1, -1)))
+    test_rmse = np.sqrt(np.square(y_true[..., None] - y_pred_stochastic).mean(axis=1))
     # Mean on test_size (axis=0) and statistic on sample_size (axis=-1)
-    ttm, dtm = test_rmse.mean(axis=0)
-    tts, dts = test_rmse.std(axis=0)
+    ttm, dtm = test_rmse.mean(axis=(0, -1))
+    tts, dts = test_rmse.std(axis=(0, -1))
     return {"temperature": {"mean": ttm, "std": tts}, "density": {"mean": dtm, "std": dts}}
 
 def their_test_rmse(y_true, y_pred_stochastic):
@@ -40,15 +40,15 @@ def test_rmse(y_true, y_pred_stochastic):
 
 
 def per_sample_physical_inconsistency(y_pred_stochastic):
-    inconsistencies = phyincon(torch.from_numpy(y_pred_stochastic[:, :, 1, :]), tol=1e-5, axis=1,
-                               agg_dims=1).detach().numpy()
-    return {"mean": inconsistencies.mean(), "std": inconsistencies.std()}
+    inconsistencies = phyincon(torch.from_numpy(y_pred_stochastic[:, :, 1, :]), tol=1e-5,
+                               r_axis=1, d_axis=1).detach().numpy()
+    return {"mean": inconsistencies.mean(axis=(0,-1)), "std": inconsistencies.std(axis=(0,-1))}
 
 
 def mean_physical_inconsistency(y_pred_stochastic):
-    inconsistencies = phyincon(torch.from_numpy(y_pred_stochastic[:, :, 1, :].mean(axis=-1)), tol=1e-5, axis=1,
-                               agg_dims=1).detach().numpy()
-    return {"mean": inconsistencies.mean(), "std": inconsistencies.std()}
+    inconsistencies = phyincon(torch.from_numpy(y_pred_stochastic[:, :, 1, :].mean(axis=-1)), tol=1e-5, r_axis=1,
+                               d_axis=1).detach().numpy()
+    return {"mean": inconsistencies.mean(axis=0), "std": inconsistencies.std(axis=0)}
 
 
 def test_physical_inconsistency(y_pred_stochastic):
@@ -59,11 +59,16 @@ def prefix_nested(col: str) -> pl.Expr:
     return pl.col(col).name.prefix_fields(col + ".")
 
 
-def table_from_results(test_results):
+def _table_from_results(test_results):
     return (
         pl.from_dicts(test_results)
-        .with_columns(prefix_nested("rmse"), prefix_nested("physical_inconsistency"))
+        .with_columns(prefix_nested("rmse"), prefix_nested("physical_inconsistency"), with_glm=pl.lit(True))
         .unnest("rmse", "physical_inconsistency")
         .with_columns(prefix_nested("rmse.per_sample"), prefix_nested("rmse.mean"), prefix_nested("rmse.their"))
         .unnest("rmse.per_sample", "rmse.mean", "rmse.their")
     )
+
+def table_from_results(test_results_w_glm, test_results_wo_glm):
+    tab_w = _table_from_results(test_results_w_glm).with_columns(with_glm=pl.lit(True))
+    tab_wo = _table_from_results(test_results_wo_glm).with_columns(with_glm=pl.lit(False))
+    return pl.concat([tab_w, tab_wo])

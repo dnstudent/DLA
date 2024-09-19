@@ -1,4 +1,5 @@
 import torch
+from torch.nn import Parameter
 from torchmetrics.functional import mean_squared_error
 
 from src.datasets.tools import density
@@ -34,11 +35,22 @@ def descending_fraction(input: torch.Tensor, tol, axis, agg_dims):
     deltas = input.diff(dim=axis)
     return torch.mean(deltas < -abs(tol), dtype=deltas.dtype, dim=agg_dims)
 
-def physical_inconsistency(input: torch.Tensor, tol=0, axis=2, agg_dims=(0,1)):
-    return descending_fraction(input, tol, axis, agg_dims)
+def ordered_fraction(input: torch.Tensor, cmp, tol, r_axis=(0,1,2), d_axis=-2):
+    """ Fraction of descending terms in the penultimate dimension of the given tensor
+    @return:
+    """
+    deltas = input.diff(dim=d_axis)
+    return cmp(deltas, tol).mean(dtype=deltas.dtype, dim=r_axis)
 
-def physical_consistency(input: torch.Tensor, tol=0, axis=2, agg_dims=(0,1)):
-    return 1 - descending_fraction(input, tol, axis, agg_dims)
+def physical_inconsistency(input: torch.Tensor, tol=0, r_axis=(0,1,2), d_axis=-2):
+    return ordered_fraction(input, torch.less_equal, -abs(tol), r_axis, d_axis)
+
+def physical_consistency(input: torch.Tensor, tol=0, r_axis=(0,1,2), d_axis=-2):
+    return ordered_fraction(input, torch.greater, -abs(tol), r_axis, d_axis)
 
 def count_parameters(model, all):
     return sum(p.numel() for p in model.parameters() if all or p.requires_grad)
+
+
+def make_base_weight(*shape) -> Parameter:
+    return Parameter(torch.empty(*shape, dtype=torch.float32))

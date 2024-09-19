@@ -94,7 +94,7 @@ def windowed_unique_date_indices(dates: pl.Series, window_size: int):
 # def exclude_temporal_indices(dates, window_size, idxs):
 #     dates = pl.DataFrame(dates).with_row_index(name="idx")
 #     dates = dates.with_columns(
-#         window_dates=pl.date_ranges(start=pl.col("date").dt.offset_by(f"-{window_size - 1}d"), end="date"))
+#         window_dates=pl.date_ranges(start=pl.col("date").dt.offset_by(f"-{window_size - 1}x"), end="date"))
 #     selected = dates[idxs].sort("idx")
 #     left = (
 #         dates

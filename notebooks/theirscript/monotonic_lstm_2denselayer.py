@@ -64,7 +64,7 @@ class mLSTMCell(Layer):
         dropout: Float between 0 and 1.
             Fraction of the units to drop for
             the linear transformation of the inputs.
-        recurrent_dropout: Float between 0 and 1.
+        input_dropout_rate: Float between 0 and 1.
             Fraction of the units to drop for
             the linear transformation of the recurrent state.
         hidden_dropout : Float between 0 and 1.
@@ -419,7 +419,7 @@ class mLSTMCell(Layer):
                       constraints.serialize(self.recurrent_constraint),
                   'bias_constraint': constraints.serialize(self.bias_constraint),
                   'dropout': self.dropout,
-                  'recurrent_dropout': self.recurrent_dropout,
+                  'input_dropout_rate': self.recurrent_dropout,
                   'hidden_dropout': self.hidden_dropout,
                   'implementation': self.implementation}
         base_config = super(mLSTMCell, self).get_config()
@@ -481,7 +481,7 @@ class mLSTM(RNN):
         dropout: Float between 0 and 1.
             Fraction of the units to drop for
             the linear transformation of the inputs.
-        recurrent_dropout: Float between 0 and 1.
+        input_dropout_rate: Float between 0 and 1.
             Fraction of the units to drop for
             the linear transformation of the recurrent state.
         hidden_dropout: Float between 0 and 1.
@@ -550,7 +550,7 @@ class mLSTM(RNN):
             warnings.warn(
                 'RNN dropout is no longer supported with the Theano backend '
                 'due to technical limitations. '
-                'You can either set `dropout` and `recurrent_dropout` to 0, '
+                'You can either set `dropout` and `input_dropout_rate` to 0, '
                 'or use the TensorFlow backend.')
             dropout = 0.
             recurrent_dropout = 0.
@@ -669,7 +669,7 @@ class mLSTM(RNN):
 
     @property
     def recurrent_dropout(self):
-        return self.cell.recurrent_dropout
+        return self.cell.input_dropout_rate
     
     @property
     def hidden_dropout(self):
@@ -707,7 +707,7 @@ class mLSTM(RNN):
                       constraints.serialize(self.recurrent_constraint),
                   'bias_constraint': constraints.serialize(self.bias_constraint),
                   'dropout': self.dropout,
-                  'recurrent_dropout': self.recurrent_dropout,
+                  'input_dropout_rate': self.recurrent_dropout,
                   'implementation': self.implementation}
         base_config = super(mLSTM, self).get_config()
         del base_config['cell']

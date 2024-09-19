@@ -94,7 +94,7 @@ def make_spatiotemporal_dataset_v2(full_table_loader, drivers_reader, depth_step
         d = d.to_numpy().astype(np.float32).reshape((len(y), depth_steps, -1))
 
         return (
-            # d
+            # x
             d,
             # w
             drivers.drop("date").explode("features").unnest("features").drop("date").to_numpy().astype(np.float32).reshape((len(drivers), time_steps, -1)),
@@ -118,14 +118,18 @@ def make_spatiotemporal_split_dataset(spatiotemporal_dataset_maker, split):
         return x[:split], x[split:], w[:split], w[split:], y[:split], y[split:], t[:split], t[split:]
     return _fn
 
-def prepare_their_data(x, w, y, x_test, w_test, y_test, train_size, val_size, shuffle_train):
+def prepare_their_data(x, w, y, x_test, w_test, y_test, train_size, val_size, shuffle_train, random_state):
     # Taking the actual train dataset as a subset
-    x_train, w_train, y_train = take_frac(x, w, y, axis=0, frac=train_size, shuffle=True, random_state=42)
+    x_train, w_train, y_train = take_frac(x, w, y, axis=0, frac=train_size, shuffle=shuffle_train, random_state=random_state)
     # Splitting in training and validation
-    x_train, x_val, w_train, w_val, y_train, y_val = train_test_split(x_train, w_train, y_train, test_size=val_size, random_state=42, shuffle=shuffle_train)
+    x_train, x_val, w_train, w_val, y_train, y_val = train_test_split(x_train, w_train, y_train, test_size=val_size, shuffle=False)
     # Normalizing the datasets
     (x_train, w_train, y_train), (x_val, w_val, y_val), (x_test, w_test, y_test), (x_means, w_means, y_means), (x_stds, w_stds, y_stds) = normalize_inputs(
         [x_train, w_train, y_train], [x_val, w_val, y_val], [x_test, w_test, y_test])
+    # Temperatures are not normalized
+    y_train[..., 0] = y_train[..., 0]*y_stds[..., 0] + y_means[..., 0]
+    y_val[..., 0] = y_val[..., 0]*y_stds[..., 0] + y_means[..., 0]
+    y_test[..., 0] = y_test[..., 0]*y_stds[..., 0] + y_means[..., 0]
     # Padding the datasets
     # x_train, x_val, x_test = their_edge_padding(x_train, x_val, x_test, pad_steps=pad_size, axis=1)
     return x_train, x_val, x_test, w_train, w_val, w_test, y_train, y_val, y_test, y_means, y_stds

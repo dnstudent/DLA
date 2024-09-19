@@ -26,7 +26,7 @@ def model_logs_dir(root_dir, model_class, autoencoder_version, train_frac, hpara
 def best_model(root_dir, model_class, autoencoder_version, train_frac, hparams_set, ulterior_tags) -> Path:
     return model_dir(root_dir, model_class, autoencoder_version, train_frac, hparams_set, ulterior_tags) / "best_model.ckpt"
 
-def train_model(root_dir: Path, model_class: Type[L.LightningModule], autoencoder_version: Optional[str], train_frac: float, hparams_set: Dict[str, Union[str, int, float, bool]], ulterior_tags: Optional[List[str]], train_ds: Dataset, val_ds: Dataset, log: bool, max_epochs: int, trainer_kwargs: Optional[Dict[str, Any]]):
+def train_model(root_dir: Path, model_class: Type[L.LightningModule], autoencoder_version: Optional[str], train_frac: float, hparams_set: Dict[str, Union[str, int, float, bool]], ulterior_tags: Optional[List[str]], train_ds: Dataset, val_ds: Dataset, log: bool, max_epochs: int, batch_size: int, trainer_kwargs: Optional[Dict[str, Any]]):
     root_dir = model_dir(root_dir, model_class, autoencoder_version, train_frac, hparams_set, ulterior_tags)
     if not os.path.exists(root_dir):
         os.makedirs(root_dir)
@@ -50,14 +50,14 @@ def train_model(root_dir: Path, model_class: Type[L.LightningModule], autoencode
     model = model_class(**hparams_set)
     trainer.fit(
         model,
-        train_dataloaders=DataLoader(train_ds, batch_size=20, shuffle=True, num_workers=7, persistent_workers=True),
+        train_dataloaders=DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=7, persistent_workers=True),
         val_dataloaders=DataLoader(val_ds, batch_size=256, shuffle=False, num_workers=7, persistent_workers=True)
     )
     shutil.copy(checkpoint.best_model_path, root_dir / "best_model.ckpt")
     return model_class.load_from_checkpoint(root_dir / "best_model.ckpt"), root_dir / "best_model.ckpt"
 
 def train_or_load_best(root_dir, model_class: Type[L.LightningModule], autoencoder_version: Optional[str], train_frac: float, hparams_set: Dict[str, Union[str, int, float, bool]],
-                       ulterior_tags: Optional[List[str]], train_ds: Dataset, val_ds: Dataset, log: bool, max_epochs: int, force_retrain: bool, trainer_kwargs: Optional[Dict[str, Any]]) -> Tuple[L.LightningModule, Union[str, Path]]:
+                       ulterior_tags: Optional[List[str]], train_ds: Dataset, val_ds: Dataset, log: bool, max_epochs: int, batch_size: int, force_retrain: bool, trainer_kwargs: Optional[Dict[str, Any]]) -> Tuple[L.LightningModule, Union[str, Path]]:
     if ulterior_tags is None:
         ulterior_tags = ["base"]
     if trainer_kwargs is None:
@@ -67,5 +67,5 @@ def train_or_load_best(root_dir, model_class: Type[L.LightningModule], autoencod
         return model_class.load_from_checkpoint(best_model_path), best_model_path
     if best_model_path.exists() and force_retrain:
         shutil.rmtree(model_dir(root_dir, model_class, autoencoder_version, train_frac, hparams_set, ulterior_tags))
-    return train_model(root_dir, model_class, autoencoder_version, train_frac, hparams_set, ulterior_tags, train_ds, val_ds, log, max_epochs, trainer_kwargs)
+    return train_model(root_dir, model_class, autoencoder_version, train_frac, hparams_set, ulterior_tags, train_ds, val_ds, log, max_epochs, batch_size, trainer_kwargs)
 
