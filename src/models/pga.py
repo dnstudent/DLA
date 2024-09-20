@@ -7,7 +7,7 @@ from torch import jit
 from torch import nn
 from torch.nn.functional import relu, dropout
 
-from src.models.tools import make_base_weight
+from src.models.tools import make_base_weight, get_sequential_linear_biases
 
 
 class MonotonicLSTMCell(jit.ScriptModule):
@@ -21,6 +21,7 @@ class MonotonicLSTMCell(jit.ScriptModule):
         recurrent_dropout: float,
         z_dropout: float,
         forward_dropout: float,
+        sign: int = 1,
         **kwargs
     ):
         super().__init__()
@@ -51,9 +52,8 @@ class MonotonicLSTMCell(jit.ScriptModule):
         self.bias_o = make_base_weight(self.hidden_size)
         self.dense_1 = nn.Linear(self.hidden_size, self.forward_size)
         self.dense_2 = nn.Linear(self.forward_size, self.forward_size)
-        self.delta = nn.Sequential(
-            nn.Linear(self.forward_size, self.output_size), nn.ReLU()
-        )
+        self.delta = nn.Linear(self.forward_size, self.output_size)
+        self.sign = sign
 
         self.x_dropout: Tensor = self._make_dropout_mask(
             [4, self.n_input_features], self.input_dropout_rate
@@ -72,23 +72,9 @@ class MonotonicLSTMCell(jit.ScriptModule):
         self.init_recurrent_weights()
         self.init_recurrent_biases()
         self.init_sequential_params()
-        self.init_dropouts(1)
 
     def init_recurrent_weights(self):
-        for weight in [
-            self.weight_xi,
-            self.weight_xf,
-            self.weight_xc,
-            self.weight_xo,
-            self.weight_hi,
-            self.weight_hf,
-            self.weight_hc,
-            self.weight_ho,
-            self.weight_zi,
-            self.weight_zf,
-            self.weight_zc,
-            self.weight_zo,
-        ]:
+        for weight in self.weights:
             nn.init.orthogonal_(weight)
 
     def init_recurrent_biases(self):
@@ -103,9 +89,8 @@ class MonotonicLSTMCell(jit.ScriptModule):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.zeros_(m.bias)
 
-        for layer in [self.dense_1, self.dense_2]:
+        for layer in [self.dense_1, self.dense_2, self.delta]:
             weights_init(layer)
-        self.delta.apply(weights_init)
 
     def _make_dropout_mask(self, shape: List[int], dropout_rate: float):
         return dropout(
@@ -128,6 +113,19 @@ class MonotonicLSTMCell(jit.ScriptModule):
         self.d2_dropout = self._make_dropout_mask(
             [batch_size, self.forward_size], self.forward_dropout_rate
         )
+
+    @property
+    def weights(self):
+        return [
+            self.weight_xi, self.weight_xf, self.weight_xc, self.weight_xo,
+            self.weight_hi, self.weight_hf, self.weight_hc, self.weight_ho,
+            self.weight_zi, self.weight_zf, self.weight_zc, self.weight_zo,
+            self.dense_1.weight, self.dense_2.weight, self.delta.weight
+        ]
+
+    @property
+    def biases(self):
+        return [self.bias_i, self.bias_f, self.bias_c, self.bias_o, self.dense_1.bias, self.dense_2.bias, self.delta.bias]
 
     @jit.script_method
     def forward(
@@ -172,8 +170,8 @@ class MonotonicLSTMCell(jit.ScriptModule):
         # Monotonicity-preserving steps
         dt = relu(self.dense_1(ht)) * self.d1_dropout
         dt = relu(self.dense_2(dt)) * self.d2_dropout
-        dt = self.delta(dt)
-        zt = zp + dt
+        dt = relu(self.delta(dt))
+        zt = zp + self.sign*dt
         return ht, ct, zt
 
 

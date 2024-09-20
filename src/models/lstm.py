@@ -9,12 +9,29 @@ from src.models.pga import MonotonicLSTMCell
 from src.models.tools import make_base_weight
 
 
+
 class MonotonicLSTM(jit.ScriptModule):
     def __init__(
-        self, n_input_features: int, *, cell: Type[MonotonicLSTMCell], **kwargs
+        self, n_input_features: int, sign: int = 1, *, cell: Type[MonotonicLSTMCell], **kwargs
     ):
         super().__init__()
-        self.cell = cell(n_input_features=n_input_features, **kwargs)
+        self.cell = cell(n_input_features=n_input_features, sign=sign, **kwargs)
+
+    @property
+    def recursive_weights(self):
+        return self.cell.weights
+
+    @property
+    def recursive_biases(self):
+        return self.cell.biases
+
+    @property
+    def linear_weights(self):
+        return []
+
+    @property
+    def linear_biases(self):
+        return []
 
     @jit.script_method
     def forward(
@@ -71,16 +88,7 @@ class DropoutLSTMCell(jit.ScriptModule):
         self.init_recurrent_biases()
 
     def init_recurrent_weights(self):
-        for weight in [
-            self.weight_xi,
-            self.weight_xf,
-            self.weight_xc,
-            self.weight_xo,
-            self.weight_hi,
-            self.weight_hf,
-            self.weight_hc,
-            self.weight_ho,
-        ]:
+        for weight in self.weights:
             nn.init.orthogonal_(weight)
 
     def init_recurrent_biases(self):
@@ -103,6 +111,15 @@ class DropoutLSTMCell(jit.ScriptModule):
         self.h_dropout = self._make_dropout_mask(
             [4 * batch_size, self.hidden_size], self.recurrent_dropout_rate
         )
+
+    @property
+    def weights(self):
+        return [self.weight_xi, self.weight_xf, self.weight_xc, self.weight_xo, self.weight_hi, self.weight_hf,
+            self.weight_hc, self.weight_ho]
+
+    @property
+    def biases(self):
+        return [self.bias_i, self.bias_f, self.bias_c, self.bias_o]
 
     @jit.script_method
     def forward(
@@ -146,6 +163,22 @@ class DropoutLSTM(jit.ScriptModule):
     def __init__(self, n_input_features: int, hidden_size: int, dropout_rate: float):
         super().__init__()
         self.cell = DropoutLSTMCell(n_input_features=n_input_features, hidden_size=hidden_size, input_dropout=dropout_rate, recurrent_dropout=dropout_rate)
+
+    @property
+    def recursive_weights(self):
+        return self.cell.weights
+
+    @property
+    def recursive_biases(self):
+        return self.cell.biases
+
+    @property
+    def linear_weights(self):
+        return []
+
+    @property
+    def linear_biases(self):
+        return []
 
     @jit.script_method
     def forward(

@@ -3,6 +3,7 @@ from typing import Tuple, Optional
 import torch
 from torch import nn, Tensor
 
+from .tools import get_sequential_linear_weights, get_sequential_linear_biases
 from ..models.pga import MonotonicLSTMCell
 from ..models.lstm import MonotonicLSTM
 
@@ -48,12 +49,29 @@ class LSTMTemperatureRegressorV2(nn.Module):
         super().__init__()
         # self.recurrent = nn.GRU(1 + n_depth_features, hidden_size=weather_embedding_size, batch_first=True)
         self.hadapter = nn.Sequential(nn.Dropout(p=forward_dropout), nn.Linear(weather_embedding_size, hidden_size))
-        self.recurrent = MonotonicLSTM(1+n_depth_features, output_size=1, hidden_size=hidden_size, forward_size=forward_size, input_dropout=input_dropout, recurrent_dropout=recurrent_dropout, z_dropout=z_dropout, forward_dropout=forward_dropout, cell=MonotonicLSTMCell)
+        self.recurrent = MonotonicLSTM(1+n_depth_features, output_size=1, hidden_size=hidden_size, forward_size=forward_size, input_dropout=input_dropout, recurrent_dropout=recurrent_dropout, z_dropout=z_dropout, forward_dropout=forward_dropout, sign=-1, cell=MonotonicLSTMCell)
         # self.activation = nn.ELU(alpha=1.0)
         # self.output_layer = nn.Linear(weather_embedding_size, 1)
         # self.dropout = nn.Dropout(dropout_rate)
 
-    def forward(self, z: Tensor, x: Tensor, h0: Tensor):
+    @property
+    def recursive_weights(self):
+        return self.recurrent.recursive_weights
+
+    @property
+    def recursive_biases(self):
+        return self.recurrent.recursive_biases
+
+    @property
+    def linear_weights(self):
+        return self.recurrent.linear_weights + get_sequential_linear_weights(self.hadapter)
+
+    @property
+    def linear_biases(self):
+        return self.recurrent.linear_biases + get_sequential_linear_biases(self.hadapter)
+
+    def forward(self, z: Tensor, x: Tensor, h0: Tensor, t0: Tensor):
         x = torch.cat((z, x), dim=-1)
+        h0 = self.hadapter(h0)
         c0 = torch.zeros_like(h0)
-        return self.recurrent(x, (h0, c0))
+        return self.recurrent(x, (h0, c0, t0))[0]

@@ -1,4 +1,5 @@
-from typing import Any, Optional, Tuple
+from itertools import chain
+from typing import Any, Tuple
 
 import lightning as L
 import torch
@@ -9,8 +10,8 @@ from torchmetrics.functional import mean_squared_error
 from typing_extensions import override
 
 from .density_regressors import MonotonicDensityRegressorV2
-from .initializers import LSTMZ0InitializerV2
-from .temperature_regressors import TemperatureRegressorV2
+from .initializers import LSTMTZ0InitializerV2
+from .temperature_regressors import LSTMTemperatureRegressorV2
 from .tools import physical_consistency
 
 
@@ -22,9 +23,9 @@ class TZRegressorV2(nn.Module):
         self.temperature_regressor = temperature_regressor
 
     def forward(self, x: Tensor, w: Tensor) -> Tuple[Tensor, Tensor]:
-        z0_hat, h0 = self.weather_preprocessor(w)
+        t0_hat, z0_hat, h0 = self.weather_preprocessor(w)
         z_hat = self.density_regressor(x, h0, z0_hat)
-        t_hat = self.temperature_regressor(z_hat, x, h0)
+        t_hat = self.temperature_regressor(z_hat, x, h0, t0_hat)
         return t_hat, z_hat
 
 class LitTZRegressorV2(L.LightningModule):
@@ -100,50 +101,48 @@ class LitTZRegressorV2(L.LightningModule):
     def configure_optimizers(self) -> OptimizerLRScheduler:
         return self.optimizer_class(self.parameters(), lr=self.lr)
 
-class SmallNet(LitTZRegressorV2):
-    def __init__(self,
-                 n_depth_features,
-                 n_weather_features,
-                 initial_lr1: float,
-                 initial_lr2: float,
-                 initial_lr3: float,
-                 recurrent_weight_decay: float,
-                 linear_weight_decay: float,
-                 density_lambda: float,
-                 hidden_dropout_rate: float,
-                 input_dropout_rate: float,
-                 multiproc: bool,
-                 forward_size: int = 5,
-                 weather_embedding_size: int = 8,
-                 hidden_size: int = 5,
-                 ):
-        weather_preprocessor = LSTMZ0InitializerV2(n_weather_features=n_weather_features, weather_embedding_size=weather_embedding_size, dropout_rate=hidden_dropout_rate)
-        density_regressor = MonotonicDensityRegressorV2(n_depth_features=n_depth_features, weather_embeddings_size=weather_embedding_size, hidden_size=hidden_size, forward_size=forward_size, input_dropout=input_dropout_rate, recurrent_dropout=hidden_dropout_rate, z_dropout=0.0, forward_dropout=hidden_dropout_rate)
-        temperature_regressor = TemperatureRegressorV2(n_depth_features=n_depth_features, weather_embedding_size=weather_embedding_size, forward_size=2, input_dropout=input_dropout_rate, recurrent_dropout=hidden_dropout_rate, z_dropout=0.0, forward_dropout=hidden_dropout_rate)
-        super().__init__(weather_preprocessor=weather_preprocessor, density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_depth_features=n_depth_features, n_weather_features=n_weather_features, lr=None, weight_decay=weight_decay, density_lambda=density_lambda, dropout_rate=dropout_rate, multiproc=multiproc)
-        self.initial_lr1 = initial_lr1
-        self.initial_lr2 = initial_lr2
-        self.initial_lr3 = initial_lr3
-
-    def configure_optimizers(self) -> OptimizerLRScheduler:
-        first_linear_kernel = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
-                               name == "first_linear.weight"]
-        other_params = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
-                        name != "first_linear.weight"]
-        return torch.optim.Adam([
-            {"params": self.tz_regressor.weather_regressor.parameters(), "lr": self.initial_lr1},
-            {"params": self.tz_regressor.density_regressor.parameters(), "lr": self.initial_lr2},
-            {"params": first_linear_kernel, "weight_decay": self.weight_decay, "lr": self.initial_lr3},
-            {"params": other_params, "lr": self.initial_lr3},
-        ], eps=1e-7, weight_decay=0.0)
+# class SmallNet(LitTZRegressorV2):
+#     def __init__(self,
+#                  n_depth_features,
+#                  n_weather_features,
+#                  initial_lr1: float,
+#                  initial_lr2: float,
+#                  initial_lr3: float,
+#                  recurrent_weight_decay: float,
+#                  linear_weight_decay: float,
+#                  density_lambda: float,
+#                  hidden_dropout_rate: float,
+#                  input_dropout_rate: float,
+#                  multiproc: bool,
+#                  forward_size: int = 5,
+#                  weather_embedding_size: int = 8,
+#                  hidden_size: int = 5,
+#                  ):
+#         weather_preprocessor = LSTMZ0InitializerV2(n_weather_features=n_weather_features, weather_embedding_size=weather_embedding_size, dropout_rate=hidden_dropout_rate)
+#         density_regressor = MonotonicDensityRegressorV2(n_depth_features=n_depth_features, weather_embeddings_size=weather_embedding_size, hidden_size=hidden_size, forward_size=forward_size, input_dropout=input_dropout_rate, recurrent_dropout=hidden_dropout_rate, z_dropout=0.0, forward_dropout=hidden_dropout_rate)
+#         temperature_regressor = TemperatureRegressorV2(n_depth_features=n_depth_features, weather_embedding_size=weather_embedding_size, forward_size=2, input_dropout=input_dropout_rate, recurrent_dropout=hidden_dropout_rate, z_dropout=0.0, forward_dropout=hidden_dropout_rate)
+#         super().__init__(weather_preprocessor=weather_preprocessor, density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_depth_features=n_depth_features, n_weather_features=n_weather_features, lr=None, weight_decay=weight_decay, density_lambda=density_lambda, dropout_rate=dropout_rate, multiproc=multiproc)
+#         self.initial_lr1 = initial_lr1
+#         self.initial_lr2 = initial_lr2
+#         self.initial_lr3 = initial_lr3
+#
+#     def configure_optimizers(self) -> OptimizerLRScheduler:
+#         first_linear_kernel = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
+#                                name == "first_linear.weight"]
+#         other_params = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
+#                         name != "first_linear.weight"]
+#         return torch.optim.Adam([
+#             {"params": self.tz_regressor.weather_regressor.parameters(), "lr": self.initial_lr1},
+#             {"params": self.tz_regressor.density_regressor.parameters(), "lr": self.initial_lr2},
+#             {"params": first_linear_kernel, "weight_decay": self.weight_decay, "lr": self.initial_lr3},
+#             {"params": other_params, "lr": self.initial_lr3},
+#         ], eps=1e-7, weight_decay=0.0)
 
 class MyNet(LitTZRegressorV2):
     def __init__(self,
                  n_depth_features,
                  n_weather_features,
-                 initial_lr1: float,
-                 initial_lr2: float,
-                 initial_lr3: float,
+                 lr: float,
                  recurrent_weight_decay: float,
                  linear_weight_decay: float,
                  density_lambda: float,
@@ -153,15 +152,16 @@ class MyNet(LitTZRegressorV2):
                  forward_size: int,
                  weather_embedding_size: int,
                  hidden_size: int,
+                 optimizer_class = torch.optim.AdamW
                  ):
-        weather_preprocessor = LSTMZ0InitializerV2(n_weather_features=n_weather_features, weather_embedding_size=weather_embedding_size, dropout_rate=hidden_dropout_rate)
+        weather_preprocessor = LSTMTZ0InitializerV2(n_weather_features=n_weather_features, weather_embedding_size=weather_embedding_size, dropout_rate=hidden_dropout_rate)
         density_regressor = MonotonicDensityRegressorV2(n_depth_features=n_depth_features,
                                                         weather_embeddings_size=weather_embedding_size,
                                                         hidden_size=hidden_size, forward_size=forward_size,
                                                         input_dropout=input_dropout_rate,
                                                         recurrent_dropout=hidden_dropout_rate, z_dropout=0.0,
                                                         forward_dropout=hidden_dropout_rate)
-        temperature_regressor = TemperatureRegressorV2(n_depth_features=n_depth_features,
+        temperature_regressor = LSTMTemperatureRegressorV2(n_depth_features=n_depth_features,
                                                        weather_embedding_size=weather_embedding_size,
                                                        hidden_size=3,
                                                        forward_size=2,
@@ -169,21 +169,32 @@ class MyNet(LitTZRegressorV2):
                                                        recurrent_dropout=hidden_dropout_rate,
                                                        z_dropout=0.0,
                                                        forward_dropout=.05)
-        super().__init__(weather_preprocessor=weather_preprocessor, density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_depth_features=n_depth_features, n_weather_features=n_weather_features, lr=None, density_lambda=density_lambda, dropout_rate=dropout_rate, multiproc=multiproc)
-        self.initial_lr1 = initial_lr1
-        self.initial_lr2 = initial_lr2
-        self.initial_lr3 = initial_lr3
+        super().__init__(weather_preprocessor=weather_preprocessor, density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_depth_features=n_depth_features, n_weather_features=n_weather_features, lr=lr, density_lambda=density_lambda, dropout_rate=hidden_dropout_rate, multiproc=multiproc, optimizer_class=optimizer_class)
         self.recurrent_weight_decay = recurrent_weight_decay
         self.linear_weight_decay = linear_weight_decay
 
+    @property
+    def recursive_weights(self):
+        return chain.from_iterable(map(lambda component: component.recursive_weights, [self.tz_regressor.weather_preprocessor, self.tz_regressor.density_regressor, self.tz_regressor.temperature_regressor]))
+
+    @property
+    def recursive_biases(self):
+        return chain.from_iterable(map(lambda component: component.recursive_biases, [self.tz_regressor.weather_preprocessor, self.tz_regressor.density_regressor, self.tz_regressor.temperature_regressor]))
+
+    @property
+    def linear_weights(self):
+        return chain.from_iterable(map(lambda component: component.linear_weights, [self.tz_regressor.weather_preprocessor, self.tz_regressor.density_regressor, self.tz_regressor.temperature_regressor]))
+
+    @property
+    def linear_biases(self):
+        return chain.from_iterable(map(lambda component: component.linear_biases, [self.tz_regressor.weather_preprocessor, self.tz_regressor.density_regressor, self.tz_regressor.temperature_regressor]))
+
     def configure_optimizers(self) -> OptimizerLRScheduler:
-        first_linear_kernel = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
-            name == "first_linear.weight"]
-        other_params = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
-            name != "first_linear.weight"]
         return self.optimizer_class(
-            [{"params": self.tz_regressor.initializer.parameters(), "weight_decay": self.initializer_weight_decay, },
-                {"params": self.tz_regressor.density_regressor.parameters(),
-                    "weight_decay": self.density_weight_decay, },
-                {"params": first_linear_kernel, "weight_decay": self.linear_weight_decay, },
-                {"params": other_params}, ], lr=self.lr, eps=1e-7, weight_decay=0.0, )
+            [
+                {"params": self.recursive_weights, "weight_decay": self.recurrent_weight_decay},
+                {"params": self.recursive_biases},
+                {"params": self.linear_weights, "weight_decay": self.linear_weight_decay},
+                {"params": self.linear_biases}
+             ], lr=self.lr, eps=1e-7, weight_decay=0.0,
+        )

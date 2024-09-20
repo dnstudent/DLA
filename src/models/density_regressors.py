@@ -6,6 +6,7 @@ from torch import nn, Tensor
 
 from .pga import TheirMonotonicLSTMCell, MonotonicLSTMCell
 from .lstm import MonotonicLSTM, DropoutLSTM
+from .tools import get_sequential_linear_biases, get_sequential_linear_weights
 
 
 class DensityRegressor(ABC):
@@ -94,6 +95,22 @@ class MonotonicDensityRegressorV2(DensityRegressorV2, nn.Module):
             self.hadapter = nn.Sequential(
                 nn.Linear(weather_embeddings_size, hidden_size)
             )
+
+    @property
+    def recursive_weights(self):
+        return self.net.recursive_weights
+
+    @property
+    def recursive_biases(self):
+        return self.net.recursive_biases
+
+    @property
+    def linear_weights(self):
+        return self.net.linear_weights + get_sequential_linear_weights(self.hadapter)
+
+    @property
+    def linear_biases(self):
+        return self.net.linear_biases + get_sequential_linear_biases(self.hadapter)
 
     def forward(self, d: Tensor, h0: Tensor, z0: Tensor) -> Tensor:
         h0 = self.hadapter(h0)

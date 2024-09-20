@@ -54,3 +54,13 @@ def count_parameters(model, all):
 
 def make_base_weight(*shape) -> Parameter:
     return Parameter(torch.empty(*shape, dtype=torch.float32))
+
+def get_sequential_linear_params(sequential_model, tag):
+    return [param for name, param in sequential_model.named_parameters(recurse=True) if tag in name]
+
+def get_sequential_linear_weights(sequential_model):
+    return get_sequential_linear_params(sequential_model, tag='weight')
+
+def get_sequential_linear_biases(sequential_model):
+    return get_sequential_linear_params(sequential_model, tag='bias')
+
