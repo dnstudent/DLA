@@ -8,23 +8,8 @@ from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader, Dataset
 
-from src.tools.dicts import dict_hash
+from .v1 import model_dir, best_model
 
-
-def model_dir(root_dir, model_label, autoencoder_version, train_frac, hparams_set, ulterior_tags: Optional[List[str]]) -> Path:
-    if ulterior_tags:
-        root_dir = os.path.join(root_dir, *(list(map(str, ulterior_tags))))
-    root_dir = Path(root_dir)
-    return root_dir / model_label / f"{autoencoder_version}" / f"{train_frac}" / f"{dict_hash(hparams_set)}"
-
-def model_checkpoints_dir(root_dir, model_label, autoencoder_version, train_frac, hparams_set, ulterior_tags) -> Path:
-    return model_dir(root_dir, model_label, autoencoder_version, train_frac, hparams_set, ulterior_tags) / "checkpoints"
-
-def model_logs_dir(root_dir, model_label, autoencoder_version, train_frac, hparams_set, ulterior_tags) -> Path:
-    return model_dir(root_dir, model_label, autoencoder_version, train_frac, hparams_set, ulterior_tags) / "logs"
-
-def best_model(root_dir, model_label, autoencoder_version, train_frac, hparams_set, ulterior_tags) -> Path:
-    return model_dir(root_dir, model_label, autoencoder_version, train_frac, hparams_set, ulterior_tags) / "best_model.ckpt"
 
 def train_model(root_dir: Path, model_class: Type[L.LightningModule], model_label: str, autoencoder_version: Optional[str], train_frac: float, hparams_set: Dict[str, Union[str, int, float, bool]], ulterior_tags: Optional[List[str]], train_ds: Dataset, val_ds: Dataset, log: bool, max_epochs: int, batch_size: int, trainer_kwargs: Optional[Dict[str, Any]]):
     root_dir = model_dir(root_dir, model_label, autoencoder_version, train_frac, hparams_set, ulterior_tags)
@@ -41,9 +26,8 @@ def train_model(root_dir: Path, model_class: Type[L.LightningModule], model_labe
         enable_progress_bar=False,
         logger=TensorBoardLogger(save_dir=log_dir) if log else None,
         log_every_n_steps=1,
-        gradient_clip_val=1,
-        gradient_clip_algorithm="norm",
-        callbacks=[EarlyStopping(monitor="valid/score/t", mode="max", patience=100), checkpoint],
+        gradient_clip_val=1, gradient_clip_algorithm="norm",
+        callbacks=[EarlyStopping(monitor="valid/score/t", mode="max", patience=2500), checkpoint],
         enable_model_summary=False,
         **trainer_kwargs
     )

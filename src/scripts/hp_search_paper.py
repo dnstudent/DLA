@@ -2,10 +2,12 @@ import argparse
 import logging
 import os
 from typing import Tuple
+from datetime import timedelta
 
 logging.disable(logging.CRITICAL)
 
 import lightning as L
+from lightning.pytorch.callbacks import Timer
 import numpy as np
 import optuna
 import torch
@@ -13,7 +15,7 @@ from lightning.pytorch.callbacks import EarlyStopping
 from lightning.pytorch.profilers import SimpleProfiler
 from lightning.pytorch.loggers import TensorBoardLogger
 from rich.progress import track
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import KFold
 from torch.utils import data as tdata
 
 from src.datasets.fcr import spatiotemporal_split_dataset
@@ -30,7 +32,7 @@ def define_hparams(trial: optuna.Trial, physics_penalty):
         weight_decay = 0
     hparams = {
         "weight_decay": weight_decay,
-        "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
+        "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True),
         "density_lambda": trial.suggest_float("density_lambda", 1e-2, 1e2, log=True),
     }
     if physics_penalty:
@@ -58,13 +60,12 @@ def objective(model_name, accelerator, max_epochs, patience, work_dir, n_devices
     model_class = getattr(regressors, model_name)
     physics_penalty = "PGL" in model_name
     def _fn(trial: optuna.Trial):
-        cv = TimeSeriesSplit(n_splits=4, gap=31)
+        cv = KFold(n_splits=4, shuffle=True, random_state=seed)
         nrmse_scores = []
         val_sizes = []
         hparams = define_hparams(trial, physics_penalty)
         for i, (train_idxs, val_idxs) in track(enumerate(cv.split(x, y)), total=cv.n_splits, auto_refresh=False, transient=True, description=f"Trial {trial.number}"):
             train_ds, val_ds = prepare_their_data(x, y, train_idxs, val_idxs)
-
             trainer = L.Trainer(
                 max_epochs=max_epochs,
                 enable_checkpointing=False,
@@ -73,6 +74,7 @@ def objective(model_name, accelerator, max_epochs, patience, work_dir, n_devices
                 enable_progress_bar=False,
                 callbacks=[
                     EarlyStopping(monitor="valid/score/t", patience=patience, mode="max"),
+                    Timer(duration=timedelta(minutes=3.5), interval="epoch")
                 ],
                 logger=TensorBoardLogger(name=f'trial_{trial.number}', save_dir=os.path.join(work_dir, "logs"), version=f"fold_{i+1}") if log and i == 0 else False,
                 log_every_n_steps=1,
@@ -193,15 +195,15 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print("Program is run with ", args)
 
-    pruner = optuna.pruners.PercentilePruner(75.0, n_warmup_steps=2, n_startup_trials=25) if args.prune else optuna.pruners.NopPruner()
-    study_name = f"{args.model_name}_{args.embedding_version}_test4y_timesplit_fullparams"
+    pruner = optuna.pruners.PercentilePruner(75.0, n_warmup_steps=2, n_startup_trials=40) if args.prune else optuna.pruners.NopPruner()
+    study_name = f"{args.model_name}_{args.embedding_version}_test4y_kfold_fullparams"
     study = optuna.create_study(
         storage="postgresql://davidenicoli@localhost:5432/dla_results",
         study_name=study_name,
         direction="maximize",
         pruner=pruner,
         load_if_exists=True,
-        sampler=optuna.samplers.TPESampler(n_startup_trials=20)
+        sampler=optuna.samplers.TPESampler(n_startup_trials=40)
     )
 
     workdir = os.path.join(args.work_dir, study.study_name)

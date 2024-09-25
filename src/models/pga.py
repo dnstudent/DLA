@@ -115,7 +115,7 @@ class MonotonicLSTMCell(jit.ScriptModule):
         )
 
     @property
-    def weights(self):
+    def weights(self) -> List[Tensor]:
         return [
             self.weight_xi, self.weight_xf, self.weight_xc, self.weight_xo,
             self.weight_hi, self.weight_hf, self.weight_hc, self.weight_ho,
@@ -124,7 +124,7 @@ class MonotonicLSTMCell(jit.ScriptModule):
         ]
 
     @property
-    def biases(self):
+    def biases(self) -> List[Tensor]:
         return [self.bias_i, self.bias_f, self.bias_c, self.bias_o, self.dense_1.bias, self.dense_2.bias, self.delta.bias]
 
     @jit.script_method
@@ -164,7 +164,7 @@ class MonotonicLSTMCell(jit.ScriptModule):
 
         It = F.hardsigmoid(It)
         Ft = F.hardsigmoid(Ft)
-        ct = Ft * cp.squeeze(0) + It * torch.tanh(Ct)
+        ct = Ft * cp + It * torch.tanh(Ct)
         Ot = F.hardsigmoid(Ot)
         ht = Ot * torch.tanh(ct)
         # Monotonicity-preserving steps

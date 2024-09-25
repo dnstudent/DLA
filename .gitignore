@@ -8,6 +8,7 @@ logs/
 /data
 /notebooks/tests
 fit-perf_logs*.txt
+~$*.pptx
 
 ### macOS template
 # General

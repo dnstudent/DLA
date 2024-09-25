@@ -3,6 +3,7 @@ from typing import Tuple, Optional
 import torch
 from torch import nn, Tensor
 
+from .lstm import DropoutLSTM
 from .tools import get_sequential_linear_weights, get_sequential_linear_biases
 from ..models.pga import MonotonicLSTMCell
 from ..models.lstm import MonotonicLSTM
@@ -34,44 +35,26 @@ class FullDOutTemperatureRegressor(nn.Module):
         return self.second_linear(x)
 
 class TemperatureRegressorV2(nn.Module):
-    def __init__(self, n_depth_features: int, weather_embedding_size: int, hidden_size: int, forward_size: int, input_dropout: float, recurrent_dropout: float, z_dropout: float, forward_dropout: float):
+    def __init__(self, n_depth_features: int, weather_embedding_size: int, forward_size: int):
         super().__init__()
-        self.activation = nn.ELU(alpha=1.0)
-        self.output_layer = nn.Linear(weather_embedding_size, 1)
-
-    def forward(self, z: Tensor, x: Tensor, h0: Tensor):
-        x = torch.cat((z, x), dim=-1)
-        c0 = torch.zeros_like(h0)
-        return self.recurrent(x, (h0, c0))
-
-class LSTMTemperatureRegressorV2(nn.Module):
-    def __init__(self, n_depth_features: int, weather_embedding_size: int, hidden_size: int, forward_size: int, input_dropout: float, recurrent_dropout: float, z_dropout: float, forward_dropout: float):
-        super().__init__()
-        # self.recurrent = nn.GRU(1 + n_depth_features, hidden_size=weather_embedding_size, batch_first=True)
-        self.hadapter = nn.Sequential(nn.Dropout(p=forward_dropout), nn.Linear(weather_embedding_size, hidden_size))
-        self.recurrent = MonotonicLSTM(1+n_depth_features, output_size=1, hidden_size=hidden_size, forward_size=forward_size, input_dropout=input_dropout, recurrent_dropout=recurrent_dropout, z_dropout=z_dropout, forward_dropout=forward_dropout, sign=-1, cell=MonotonicLSTMCell)
-        # self.activation = nn.ELU(alpha=1.0)
-        # self.output_layer = nn.Linear(weather_embedding_size, 1)
-        # self.dropout = nn.Dropout(dropout_rate)
+        self.net = nn.Sequential(nn.Linear(n_depth_features+weather_embedding_size+1, forward_size), nn.ELU(alpha=1.0), nn.Linear(forward_size, 1))
 
     @property
     def recursive_weights(self):
-        return self.recurrent.recursive_weights
+        return []
 
     @property
     def recursive_biases(self):
-        return self.recurrent.recursive_biases
+        return []
 
     @property
     def linear_weights(self):
-        return self.recurrent.linear_weights + get_sequential_linear_weights(self.hadapter)
+        return get_sequential_linear_weights(self.net)
 
     @property
     def linear_biases(self):
-        return self.recurrent.linear_biases + get_sequential_linear_biases(self.hadapter)
+        return get_sequential_linear_biases(self.net)
 
-    def forward(self, z: Tensor, x: Tensor, h0: Tensor, t0: Tensor):
-        x = torch.cat((z, x), dim=-1)
-        h0 = self.hadapter(h0)
-        c0 = torch.zeros_like(h0)
-        return self.recurrent(x, (h0, c0, t0))[0]
+    def forward(self, x: Tensor, z: Tensor, wh0: Tensor) -> Tensor:
+        x = torch.cat((x, z, wh0.unsqueeze(1).expand(-1, x.size(1), -1)), dim=-1)
+        return self.net(x)

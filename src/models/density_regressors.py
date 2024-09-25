@@ -66,8 +66,8 @@ class MonotonicDensityRegressorV2(DensityRegressorV2, nn.Module):
         self,
         n_depth_features: int,
         weather_embeddings_size: int,
-        hidden_size: int,
         forward_size: int,
+        hidden_size: int,
         input_dropout: float,
         recurrent_dropout: float,
         z_dropout: float,
@@ -75,7 +75,7 @@ class MonotonicDensityRegressorV2(DensityRegressorV2, nn.Module):
     ):
         super().__init__()
         self.net = MonotonicLSTM(
-            n_input_features=n_depth_features,
+            n_input_features=n_depth_features + weather_embeddings_size,
             output_size=1,
             hidden_size=hidden_size,
             forward_size=forward_size,
@@ -85,16 +85,6 @@ class MonotonicDensityRegressorV2(DensityRegressorV2, nn.Module):
             forward_dropout=forward_dropout,
             cell=MonotonicLSTMCell,
         )
-        if weather_embeddings_size > 1:
-            self.hadapter = nn.Sequential(
-                nn.Dropout(input_dropout),
-                nn.ReLU(),
-                nn.Linear(weather_embeddings_size, hidden_size),
-            )
-        else:
-            self.hadapter = nn.Sequential(
-                nn.Linear(weather_embeddings_size, hidden_size)
-            )
 
     @property
     def recursive_weights(self):
@@ -106,13 +96,14 @@ class MonotonicDensityRegressorV2(DensityRegressorV2, nn.Module):
 
     @property
     def linear_weights(self):
-        return self.net.linear_weights + get_sequential_linear_weights(self.hadapter)
+        return self.net.linear_weights
 
     @property
     def linear_biases(self):
-        return self.net.linear_biases + get_sequential_linear_biases(self.hadapter)
+        return self.net.linear_biases
 
-    def forward(self, d: Tensor, h0: Tensor, z0: Tensor) -> Tensor:
-        h0 = self.hadapter(h0)
-        c0 = torch.zeros_like(h0)
-        return self.net(d, (h0, c0, z0))[0]
+    def forward(self, x: Tensor, wh0: Tensor, z0: Tensor) -> Tensor:
+        # h0 = self.hadapter(h0)
+        zeros = torch.zeros((1, x.size(0), self.net.cell.hidden_size), dtype=x.dtype, device=x.device)
+        x = torch.cat((x, wh0.unsqueeze(1).expand(-1, x.size(1), -1)), dim=-1)
+        return self.net(x, (zeros, zeros, z0))[0]

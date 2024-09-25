@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+from datetime import timedelta
 from typing import Tuple
 
 logging.disable(logging.CRITICAL)
@@ -9,11 +10,11 @@ import lightning as L
 import numpy as np
 import optuna
 import torch
-from lightning.pytorch.callbacks import EarlyStopping
+from lightning.pytorch.callbacks import EarlyStopping, Timer
 from lightning.pytorch.profilers import SimpleProfiler
 from lightning.pytorch.loggers import TensorBoardLogger
 from rich.progress import track
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import TimeSeriesSplit, KFold
 from torch.utils import data as tdata
 
 from src.datasets.fcr import spatiotemporal_split_dataset_v2
@@ -25,33 +26,32 @@ from src.tools.paths import ds_dir, drivers_path, embedding_path
 def define_hparams(trial: optuna.Trial):
     apply_decay = trial.suggest_int("apply_decay", 0, 1)
     if apply_decay == 1:
-        recurrent_weight_decay = trial.suggest_float("recurrent_weight_decay", 1e-7, 1, log=True)
-        linear_weight_decay = trial.suggest_float("linear_weight_decay", 1e-7, 1, log=True)
+        weight_decay = trial.suggest_float("weight_decay", 1e-7, 1, log=True)
     else:
-        recurrent_weight_decay = 0.
-        linear_weight_decay = 0.
+        weight_decay = 0.
 
     hparams = {
-        "recurrent_weight_decay": recurrent_weight_decay,
-        "linear_weight_decay": linear_weight_decay,
-        "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
+        "weight_decay": weight_decay,
+        "lr1": trial.suggest_float("lr1", 1e-4, 1e-2, log=True),
+        "lr2": trial.suggest_float("lr2", 1e-4, 1e-2, log=True),
+        "lr3": trial.suggest_float("lr3", 1e-4, 1e-2, log=True),
         "density_lambda": trial.suggest_float("density_lambda", 1e-2, 1e2, log=True),
         "hidden_dropout_rate": trial.suggest_float("hidden_dropout_rate", 0, 1),
-        "input_dropout_rate": trial.suggest_float("input_dropout_rate", 0, 1)
+        "input_dropout_rate": trial.suggest_float("input_dropout_rate", 0, 1),
+        "z_dropout_rate": 0.0
     }
     return hparams
 
 sets = {
-    "big": {"forward_size": 8, "weather_embedding_size": 12, "hidden_size": 8},
-    "medium": {"forward_size": 5, "weather_embedding_size": 8, "hidden_size": 5},
-    "small": {"forward_size": 3, "weather_embedding_size": 4, "hidden_size": 3}
+    "big": {"forward_size": 12, "weather_embedding_size": 24, "hidden_size": 16},
+    "small": {"forward_size": 3, "weather_embedding_size": 5, "hidden_size": 3},
+    "medium": {"forward_size": 5, "weather_embedding_size": 8, "hidden_size": 5}
 }
 
 def prepare_their_data(x, w, y, train_idxs, val_idxs) -> Tuple[tdata.Dataset, tdata.Dataset]:
     x_train, w_train, y_train = x[train_idxs], w[train_idxs], y[train_idxs]
     x_val, w_val, y_val = x[val_idxs], w[val_idxs], y[val_idxs]
     (x_train, w_train, y_train), (x_val, w_val, y_val), _, _  = normalize_inputs([x_train, w_train, y_train], [x_val, w_val, y_val])
-
     train_ds = tdata.TensorDataset(torch.from_numpy(x_train), torch.from_numpy(w_train),
                                    torch.from_numpy(y_train))
     val_ds = tdata.TensorDataset(torch.from_numpy(x_val), torch.from_numpy(w_val), torch.from_numpy(y_val))
@@ -66,8 +66,10 @@ def objective(accelerator, max_epochs, patience, work_dir, n_devices, profile, l
     multiproc = n_devices > 1
     size_hparams = sets[net_size]
     def _fn(trial: optuna.Trial):
-        cv = TimeSeriesSplit(n_splits=4, gap=31)
-        nrmse_scores = []
+        cv = TimeSeriesSplit(n_splits=4, gap=90, test_size=20)
+        # cv2 = KFold(n_splits=4, shuffle=True, random_state=seed)
+        nrmse_t_scores = []
+        nrmse_z_scores = []
         val_sizes = []
         hparams = define_hparams(trial)
         for i, (train_idxs, val_idxs) in track(enumerate(cv.split(x, y)), total=cv.n_splits, auto_refresh=False, transient=True, description=f"Trial {trial.number}"):
@@ -81,8 +83,9 @@ def objective(accelerator, max_epochs, patience, work_dir, n_devices, profile, l
                 enable_progress_bar=False,
                 callbacks=[
                     EarlyStopping(monitor="valid/score/t", patience=patience, mode="max"),
+                    Timer(duration=timedelta(minutes=5))
                 ],
-                logger=TensorBoardLogger(name=f'trial_{trial.number}', save_dir=os.path.join(work_dir, "logs"), version=f"fold_{i+1}") if log and i == 0 else False,
+                logger=TensorBoardLogger(name=f'trial_{trial.number}', save_dir=os.path.join(work_dir, "logs"), version=f"fold_{i+1}") if log else False,
                 log_every_n_steps=1,
                 profiler=SimpleProfiler(dirpath=work_dir, filename="perf_logs") if profile else None,
                 gradient_clip_val=1,
@@ -92,17 +95,17 @@ def objective(accelerator, max_epochs, patience, work_dir, n_devices, profile, l
 
             trainer.fit(
                 model,
-                train_dataloaders=tdata.DataLoader(train_ds, batch_size=20, shuffle=True),
+                train_dataloaders=tdata.DataLoader(train_ds, batch_size=256, shuffle=True),
                 val_dataloaders=tdata.DataLoader(val_ds, batch_size=256, shuffle=False),
             )
 
-            nrmse_scores.append(trainer.logged_metrics["valid/score/t"].item())
-            trial.report(trainer.logged_metrics["valid/score/t"].item(), i)
-            val_sizes.append(len(val_ds))
-            if trial.should_prune():
-                raise optuna.TrialPruned()
-        nrmse_score = np.average(nrmse_scores[1:], weights=val_sizes[1:])
-        return nrmse_score
+            nrmse_t_scores.append(trainer.logged_metrics["valid/score/t"].item())
+            nrmse_z_scores.append(trainer.logged_metrics["valid/score/z"].item())
+            # trial.report(trainer.logged_metrics["valid/score/t"].item(), i)
+            val_sizes.append(len(val_idxs))
+            # if trial.should_prune():
+            #     raise optuna.TrialPruned()
+        return np.average(nrmse_t_scores, weights=val_sizes), np.average(nrmse_z_scores, weights=val_sizes)
     return _fn
 
 def add_program_arguments(parser):
@@ -135,7 +138,7 @@ def add_program_arguments(parser):
         "--patience",
         action="store",
         type=int,
-        default=200,
+        default=1000,
         help="Patience of the early stopping algorithm"
     )
     parser.add_argument(
@@ -187,15 +190,15 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print("Program is run with ", args)
 
-    pruner = optuna.pruners.PercentilePruner(75.0, n_warmup_steps=2, n_startup_trials=25) if args.prune else optuna.pruners.NopPruner()
-    study_name = f"MyNet_{args.net_size}_test4y_timesplit_fullparams"
+    pruner = optuna.pruners.PercentilePruner(75.0, n_warmup_steps=2, n_startup_trials=75) if args.prune else optuna.pruners.NopPruner()
+    study_name = f"MyNet_{args.net_size}_test4y_kfold_fullparams_v2"
     study = optuna.create_study(
         storage="postgresql://davidenicoli@localhost:5432/dla_results",
         study_name=study_name,
-        direction="maximize",
+        directions=["maximize", "maximize"],
         pruner=pruner,
         load_if_exists=True,
-        sampler=optuna.samplers.TPESampler(n_startup_trials=50)
+        sampler=optuna.samplers.TPESampler(n_startup_trials=320)
     )
 
     workdir = os.path.join(args.work_dir, study.study_name)

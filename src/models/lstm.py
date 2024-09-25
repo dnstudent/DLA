@@ -18,11 +18,11 @@ class MonotonicLSTM(jit.ScriptModule):
         self.cell = cell(n_input_features=n_input_features, sign=sign, **kwargs)
 
     @property
-    def recursive_weights(self):
+    def recursive_weights(self) -> List[Tensor]:
         return self.cell.weights
 
     @property
-    def recursive_biases(self):
+    def recursive_biases(self) -> List[Tensor]:
         return self.cell.biases
 
     @property
@@ -153,13 +153,48 @@ class DropoutLSTMCell(jit.ScriptModule):
 
         It = F.hardsigmoid(It)
         Ft = F.hardsigmoid(Ft)
-        ct = Ft * cp.squeeze(0) + It * torch.tanh(Ct)
+        ct = Ft * cp + It * torch.tanh(Ct)
         Ot = F.hardsigmoid(Ot)
         ht = Ot * torch.tanh(ct)
         return ht, ct
 
 
-class DropoutLSTM(jit.ScriptModule):
+class DropoutLSTM(nn.Module):
+    def __init__(self, n_input_features: int, hidden_size: int, dropout_rate: float):
+        super().__init__()
+        self.cell = DropoutLSTMCell(n_input_features=n_input_features, hidden_size=hidden_size, input_dropout=dropout_rate, recurrent_dropout=dropout_rate)
+
+    @property
+    def recursive_weights(self):
+        return self.cell.weights
+
+    @property
+    def recursive_biases(self):
+        return self.cell.biases
+
+    @property
+    def linear_weights(self):
+        return []
+
+    @property
+    def linear_biases(self):
+        return []
+
+    # @jit.script_method
+    def forward(
+        self, x: Tensor, h: Tuple[Tensor, Tensor]
+    ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+        inputs = x.unbind(1)
+        outputs = jit.annotate(List[Tensor], [])
+        h = (h[0].squeeze(0), h[1].squeeze(0))
+        self.cell.init_dropouts(x.size(0))
+        for t in range(len(inputs)):
+            h = self.cell(inputs[t], h)
+            outputs += [h[0]]
+        h = (h[0].unsqueeze(0), h[1].unsqueeze(0))
+        return torch.stack(outputs, dim=1), h
+
+class SingleDropoutLSTM(jit.ScriptModule):
     def __init__(self, n_input_features: int, hidden_size: int, dropout_rate: float):
         super().__init__()
         self.cell = DropoutLSTMCell(n_input_features=n_input_features, hidden_size=hidden_size, input_dropout=dropout_rate, recurrent_dropout=dropout_rate)
@@ -183,15 +218,9 @@ class DropoutLSTM(jit.ScriptModule):
     @jit.script_method
     def forward(
         self, x: Tensor, h: Tuple[Tensor, Tensor]
-    ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+    ) -> Tensor:
         inputs = x.unbind(1)
-        outputs = jit.annotate(List[Tensor], [])
-        h0, c0 = h
-        h = (h0.squeeze(0), c0.squeeze(0))
         self.cell.init_dropouts(x.size(0))
         for t in range(len(inputs)):
             h = self.cell(inputs[t], h)
-            outputs += [h[0]]
-        hf, cf = h
-        h = (hf.unsqueeze(0), cf.unsqueeze(0))
-        return torch.stack(outputs, dim=1), h
+        return h[0]

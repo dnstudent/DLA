@@ -59,7 +59,7 @@ def prefix_nested(col: str) -> pl.Expr:
     return pl.col(col).name.prefix_fields(col + ".")
 
 
-def _table_from_results(test_results):
+def table_from_results(test_results):
     return (
         pl.from_dicts(test_results)
         .with_columns(prefix_nested("rmse"), prefix_nested("physical_inconsistency"), with_glm=pl.lit(True))
@@ -68,7 +68,7 @@ def _table_from_results(test_results):
         .unnest("rmse.per_sample", "rmse.mean", "rmse.their")
     )
 
-def table_from_results(test_results_w_glm, test_results_wo_glm):
-    tab_w = _table_from_results(test_results_w_glm).with_columns(with_glm=pl.lit(True))
-    tab_wo = _table_from_results(test_results_wo_glm).with_columns(with_glm=pl.lit(False))
+def table_from_results_glm(test_results_w_glm, test_results_wo_glm):
+    tab_w = table_from_results(test_results_w_glm).with_columns(with_glm=pl.lit(True))
+    tab_wo = table_from_results(test_results_wo_glm).with_columns(with_glm=pl.lit(False))
     return pl.concat([tab_w, tab_wo])

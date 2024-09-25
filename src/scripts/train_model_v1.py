@@ -4,7 +4,7 @@ from src.models import lstm
 
 def add_program_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
-        "--model_class",
+        "--model_label",
         type=str,
         required=True,
         action="store",
