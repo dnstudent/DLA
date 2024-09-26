@@ -34,7 +34,7 @@ class AutoencoderDataModule(LightningDataModule):
         self.n_timesteps = n_timesteps
         self.test_frac = test_frac
         self.train_ds, self.test_ds, self.predict_ds = autoencoder_split_dataset(
-            drivers_csv_path, n_timesteps, test_frac, seed, shuffle
+            drivers_csv_path, n_timesteps, test_frac, seed, shuffle, ordinal_day=False
             )
         self.fcr_valid = None
         self.window_scaler = StandardScaler()
@@ -42,7 +42,7 @@ class AutoencoderDataModule(LightningDataModule):
         self.train_ds = scale_wds(self.window_scaler, self.train_ds)
         self.test_ds = scale_wds(self.window_scaler, self.test_ds)
         self.predict_ds = scale_wds(self.window_scaler, self.predict_ds)
-        self.timesteps = self.drivers_table["time"][n_timesteps - 1:]
+        self.timesteps = self.drivers_table["date"][n_timesteps - 1:]
 
     @property
     def n_raw_features(self):
@@ -59,11 +59,15 @@ class AutoencoderDataModule(LightningDataModule):
         return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True)
 
     def val_dataloader(self) -> EVAL_DATALOADERS:
-        assert self.fcr_valid is not None
+        # assert self.fcr_valid is not None
+        if self.fcr_valid is None:
+            self.fcr_valid = self.train_ds
         return DataLoader(self.fcr_valid, batch_size=self.batch_size, shuffle=False)
 
     def test_dataloader(self):
-        assert self.test_ds is not None
+        # assert self.test_ds is not None
+        if self.test_ds is None or self.test_frac == 0.:
+            self.test_ds = self.train_ds
         return DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False)
 
     def predict_dataloader(self) -> EVAL_DATALOADERS:
@@ -71,11 +75,15 @@ class AutoencoderDataModule(LightningDataModule):
         return DataLoader(self.predict_ds, batch_size=self.batch_size, shuffle=False)
 
 
-def full_table(ds_dir, embedded_features_csv_path, with_glm):
+def full_table(ds_dir, embedded_features_csv_path, with_glm, ordinal_day):
     ds_dir = Path(ds_dir)
-    time_features = read_drivers_table(ds_dir / 'FCR_2013_2018_Drivers.csv').with_columns(
-        periodic_day(pl.col("date")).alias("date_components")
-    ).unnest("date_components")
+    time_features = read_drivers_table(ds_dir / 'FCR_2013_2018_Drivers.csv')
+    if ordinal_day:
+        time_features = time_features.with_columns(day=pl.col("date").dt.ordinal_day())
+    else:
+        time_features = time_features.with_columns(
+            periodic_day(pl.col("date")).alias("date_components")
+        ).unnest("date_components")
     # glm_temperatures = pl.read_csv(ds_dir / 'FCR_2013_2018_GLM_output.csv', schema_overrides={"time": pl.Date}).rename({"time": "date"})
     actual_temperatures = pl.read_csv(
         ds_dir / 'FCR_2013_2018_Observed_with_GLM_output.csv', schema_overrides={"time": pl.Date}
@@ -84,24 +92,14 @@ def full_table(ds_dir, embedded_features_csv_path, with_glm):
         temporal_embedded = pl.read_csv(embedded_features_csv_path, schema_overrides={"time": pl.Date}).select("time", cs.matches(r"e\d+")).rename({"time": "date"})
     else:
         temporal_embedded = pl.DataFrame([pl.Series("date", [], dtype=pl.Date)])
-    # computing the growing degree days feature
+    # computing the growing degree days feature (wrong? shouldn't it be daily?)
     min_temp = 5
     time_features = time_features.with_columns(
         (pl.max_horizontal(
             min_temp, pl.col("AirTemp")
         ).mean().over(pl.col("date").dt.year()) - min_temp).alias("growing_degree_days")
     ).join(temporal_embedded, on="date", how="left").filter(pl.all_horizontal(cs.by_name(["e1", "AirTemp"], require_all=False)).is_not_null())
-    # all_temperatures = (
-    # glm_temperatures.with_columns(
-    #     (pl.col("depth") * 100).cast(pl.Int32)
-    # )
-    # .join(
-    #     actual_temperatures.with_columns(
-    #         (pl.col("depth") * 100).cast(pl.Int32)
-    #     ), on=["date", "depth"], how="left").drop("temp_glm")
-    # .rename({"temp": "glm_temp"})
-    # .with_columns(pl.col("depth").truediv(100))
-    # )
+
     table = (actual_temperatures.join(time_features, on="date", how="inner").sort("date", "depth").rename(
         {"temp_observed": "temp", "temp_glm": "glm_temp"}
         ))

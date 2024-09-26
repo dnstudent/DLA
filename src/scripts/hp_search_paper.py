@@ -15,7 +15,7 @@ from lightning.pytorch.callbacks import EarlyStopping
 from lightning.pytorch.profilers import SimpleProfiler
 from lightning.pytorch.loggers import TensorBoardLogger
 from rich.progress import track
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, TimeSeriesSplit
 from torch.utils import data as tdata
 
 from src.datasets.fcr import spatiotemporal_split_dataset
@@ -51,16 +51,15 @@ def prepare_their_data(x, y, train_idxs, val_idxs) -> Tuple[tdata.Dataset, tdata
     val_ds = tdata.TensorDataset(torch.from_numpy(x_val), torch.empty((len(x_val), 1, 1)), torch.from_numpy(y_val))
     return train_ds, val_ds
 
-def objective(model_name, accelerator, max_epochs, patience, work_dir, n_devices, profile, log, seed, embedding_version, with_glm):
-    L.seed_everything(seed)
+def objective(model_name, accelerator, max_epochs, patience, work_dir, n_devices, profile, log, seed, n, embedding_version, with_glm):
     # Retrieving "train" dataset
-    x, _, _, _, y, _, _, _ = spatiotemporal_split_dataset(ds_dir("."), drivers_path(".", "fcr"), embedding_path(".", "fcr", embedding_version), with_glm)
+    x, _, _, _, y, _, _, _ = spatiotemporal_split_dataset(ds_dir("."), drivers_path(".", "fcr"), embedding_path(".", "fcr", embedding_version), with_glm, ordinal_day=True)
     n_input_features = x.shape[-1]
     multiproc = n_devices > 1
     model_class = getattr(regressors, model_name)
     physics_penalty = "PGL" in model_name
     def _fn(trial: optuna.Trial):
-        cv = KFold(n_splits=4, shuffle=True, random_state=seed)
+        cv = TimeSeriesSplit(n_splits=3, gap=90, test_size=32)
         nrmse_scores = []
         val_sizes = []
         hparams = define_hparams(trial, physics_penalty)
@@ -190,20 +189,20 @@ def add_program_arguments(parser):
 
 if __name__ == '__main__':
     logging.getLogger("lightning.pytorch").setLevel(logging.CRITICAL)
-    parser = argparse.ArgumentParser(description="PGL LSTM optimization")
+    parser = argparse.ArgumentParser(description="LSTM optimization")
     add_program_arguments(parser)
     args = parser.parse_args()
     print("Program is run with ", args)
 
     pruner = optuna.pruners.PercentilePruner(75.0, n_warmup_steps=2, n_startup_trials=40) if args.prune else optuna.pruners.NopPruner()
-    study_name = f"{args.model_name}_{args.embedding_version}_test4y_kfold_fullparams"
+    study_name = f"{args.model_name}_{args.embedding_version}_test4y_timesplit2_fullparams"
     study = optuna.create_study(
         storage="postgresql://davidenicoli@localhost:5432/dla_results",
         study_name=study_name,
         direction="maximize",
         pruner=pruner,
         load_if_exists=True,
-        sampler=optuna.samplers.TPESampler(n_startup_trials=40)
+        sampler=optuna.samplers.TPESampler(n_startup_trials=100)
     )
 
     workdir = os.path.join(args.work_dir, study.study_name)
@@ -211,6 +210,6 @@ if __name__ == '__main__':
         os.makedirs(workdir)
 
     study.optimize(
-        objective(args.model_name, args.accelerator, args.max_epochs, args.patience, workdir, args.n_devices, args.profile, args.log, seed=0, embedding_version=args.embedding_version, with_glm=not args.without_glm),
+        objective(args.model_name, args.accelerator, args.max_epochs, args.patience, workdir, args.n_devices, args.profile, args.log, seed=-1, embedding_version=args.embedding_version, with_glm=not args.without_glm),
         n_trials=args.n_trials
     )

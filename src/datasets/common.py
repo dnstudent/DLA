@@ -14,18 +14,22 @@ from .windowed import WindowedDataset
 
 
 def make_autoencoder_dataset(drivers_reader):
-    def _fn(drivers_table: pl.DataFrame, window_size: int):
+    def _fn(drivers_table: pl.DataFrame, window_size: int, ordinal_day):
         if type(drivers_table) is str:
             drivers_table = drivers_reader(drivers_table)
-        data = drivers_table.with_columns(periodic_day(pl.col("date")).alias("date_components")).unnest(
-            "date_components").sort("date")
+        data = drivers_table.sort("date")
+        if ordinal_day:
+            data = data.with_columns(day=pl.col("date").dt.ordinal_day())
+        else:
+            data = data.with_columns(periodic_day(pl.col("date")).alias("date_components")).unnest(
+            "date_components")
         return windowed(data.drop("date").to_numpy().astype(np.float32), window_size), None, windowed(
             data["date"].to_numpy(), window_size)
     return _fn
 
 def make_autoencoder_split_dataset(autoencoder_dataset_maker):
-    def _fn(drivers_path: str, window_size: int, test_frac: float, seed: int, shuffle: bool):
-        x, _, t = autoencoder_dataset_maker(drivers_path, window_size)
+    def _fn(drivers_path: str, window_size: int, test_frac: float, seed: int, shuffle: bool, ordinal_day=True):
+        x, _, t = autoencoder_dataset_maker(drivers_path, window_size, ordinal_day)
         windowed_dataset = WindowedDataset(TensorDataset(torch.from_numpy(x)), t)
         test_size = int(test_frac * len(windowed_dataset))
         indices = np.arange(len(windowed_dataset))
@@ -38,8 +42,8 @@ def make_autoencoder_split_dataset(autoencoder_dataset_maker):
     return _fn
 
 def make_spatiotemporal_dataset(full_table_loader, drivers_reader, depth_steps, time_steps):
-    def _fn(ds_dir: PathLike, drivers_path: PathLike, embedded_features_csv_path: PathLike, with_glm: bool):
-        table = full_table_loader(ds_dir, embedded_features_csv_path, with_glm)
+    def _fn(ds_dir: PathLike, drivers_path: PathLike, embedded_features_csv_path: PathLike, with_glm: bool, ordinal_day: bool):
+        table = full_table_loader(ds_dir, embedded_features_csv_path, with_glm, ordinal_day)
         table = table.filter(pl.col("temp").is_not_null()).sort("date", "depth")
         drivers = (
             drivers_reader(drivers_path)
@@ -90,7 +94,7 @@ def make_spatiotemporal_dataset_v2(full_table_loader, drivers_reader, depth_step
 
         d = table.select("depth", "glm_temp")
         if z_poly:
-            d = d.with_columns(depth_third=np.cbrt(pl.col("depth")), depth3 = pl.col("depth")**3).select("depth", "glm_temp", "depth_third", "depth3")
+            d = d.with_columns(depth_third=np.cbrt(pl.col("depth")), depth3=pl.col("depth")**3).select("depth", "glm_temp", "depth_third", "depth3")
         d = d.to_numpy().astype(np.float32).reshape((len(y), depth_steps, -1))
 
         return (
@@ -113,8 +117,8 @@ def make_spatiotemporal_dataset_v2(full_table_loader, drivers_reader, depth_step
 #     return _fn
 
 def make_spatiotemporal_split_dataset(spatiotemporal_dataset_maker, split):
-    def _fn(ds_dir, drivers_path, embedded_features_csv_path, with_glm, **kwargs):
-        x, w, y, t = spatiotemporal_dataset_maker(ds_dir, drivers_path, embedded_features_csv_path, with_glm, **kwargs)
+    def _fn(ds_dir, drivers_path, embedded_features_csv_path, with_glm, ordinal_day, **kwargs):
+        x, w, y, t = spatiotemporal_dataset_maker(ds_dir, drivers_path, embedded_features_csv_path, with_glm, ordinal_day, **kwargs)
         return x[:split], x[split:], w[:split], w[split:], y[:split], y[split:], t[:split], t[split:]
     return _fn
 

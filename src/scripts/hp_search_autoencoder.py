@@ -1,12 +1,13 @@
 import argparse
 import logging
 import os
+from datetime import timedelta
 
 import lightning as L
 import numpy as np
 import optuna
 import torch
-from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor
+from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, Timer
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.profilers import SimpleProfiler
 from rich.progress import track
@@ -31,7 +32,7 @@ def autoencoder(n_features, rnn_module, lr, optimizer_module, decoder_timesteps,
                                   lr=lr)
 
 def define_hparams(trial: optuna.Trial):
-    lr = trial.suggest_float("lr", 1e-3, 1e-2, log=True)
+    lr = trial.suggest_float("lr", 1e-4, 1e-1, log=True)
     optim_name = trial.suggest_categorical("optimizer_name", ["Adam", "Adadelta", "RMSprop"])
     return {"lr": lr, "optimizer_name": optim_name}
 
@@ -63,6 +64,7 @@ def objective(accelerator, max_epochs, patience, work_dir, n_devices, profile, r
                 callbacks=[
                     EarlyStopping(monitor="valid/nrmse", patience=patience, mode="max"),
                     LearningRateMonitor(logging_interval="epoch"),
+                    Timer(duration=timedelta(minutes=5))
                 ],
                 logger=logger,
                 log_every_n_steps=10,
@@ -126,7 +128,7 @@ def add_program_arguments(parser):
         "-m",
         action="store",
         type=int,
-        default=15000,
+        default=15_000,
         help="Number of epochs to run"
     )
     parser.add_argument(
@@ -178,6 +180,10 @@ def add_program_arguments(parser):
         default=42,
         help="Random number generator seed"
     )
+    parser.add_argument(
+        "--ordinal_day",
+        action="store_true",
+    )
 
 if __name__ == '__main__':
     logging.getLogger("lightning.pytorch").setLevel(logging.CRITICAL)
@@ -188,22 +194,23 @@ if __name__ == '__main__':
     print("Program is run with ", args)
     logging.disable(logging.WARNING)
 
-    train_ds, _, _ = autoencoder_split_dataset(args.csv_path, WINDOW_SIZE, test_frac=0.05, seed=args.seed)
+    train_ds, _, _ = autoencoder_split_dataset(args.csv_path, WINDOW_SIZE, test_frac=0.05, seed=args.seed, shuffle=True, ordinal_day=args.ordinal_day)
 
     L.seed_everything(args.seed, workers=True)
-    study_name = f"{args.recurrent_layer}_{args.decoder_timesteps}d_{args.representation_size}r"
+    study_name = f"{args.recurrent_layer}_{args.decoder_timesteps}d_{args.representation_size}r{'_ordinal' if args.ordinal_day else ''}"
 
     workdir = os.path.join(args.work_dir, study_name)
     if not os.path.exists(workdir):
         os.makedirs(workdir)
 
-    pruner = optuna.pruners.PercentilePruner(75.0, n_warmup_steps=0, n_startup_trials=10) if args.prune else optuna.pruners.NopPruner()
+    pruner = optuna.pruners.PercentilePruner(75.0, n_warmup_steps=0, n_startup_trials=20) if args.prune else optuna.pruners.NopPruner()
     study = optuna.create_study(
-        storage="postgresql://davidenicoli@localhost:5432/optuna",
+        storage="postgresql://davidenicoli@localhost:5432/dla_results",
         study_name=study_name,
         direction="maximize",
         pruner=pruner,
         load_if_exists=True,
+        sampler=optuna.samplers.RandomSampler()
     )
     study.optimize(
         objective(args.accelerator, args.max_epochs, args.patience, workdir, args.n_devices, args.profile, args.recurrent_layer, args.decoder_timesteps, args.representation_size, train_ds),

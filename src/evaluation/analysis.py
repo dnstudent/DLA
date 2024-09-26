@@ -36,7 +36,7 @@ def mean_test_rmse(y_true, y_pred_stochastic):
 
 def test_rmse(y_true, y_pred_stochastic):
     return {"per_sample": per_sample_test_rmse(y_true, y_pred_stochastic),
-            "mean": mean_test_rmse(y_true, y_pred_stochastic), "their": their_test_rmse(y_true, y_pred_stochastic)}
+            "mean": mean_test_rmse(y_true, y_pred_stochastic)}
 
 
 def per_sample_physical_inconsistency(y_pred_stochastic):

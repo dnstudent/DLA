@@ -88,4 +88,4 @@ class LitTemporalAutoencoder(L.LightningModule):
         optimizer = self.optimizer_class(self.parameters(), lr=self.lr)
         lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.95, patience=100, min_lr=1e-5,
                                          threshold=5e-3, threshold_mode="abs")
-        return {"optimizer_class": optimizer, "lr_scheduler": lr_scheduler, "monitor": "train/loss"}
+        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "train/loss"}
