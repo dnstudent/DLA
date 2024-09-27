@@ -98,43 +98,6 @@ class LitTZRegressorV2(L.LightningModule):
     def configure_optimizers(self) -> OptimizerLRScheduler:
         return self.optimizer_class(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
-# class SmallNet(LitTZRegressorV2):
-#     def __init__(self,
-#                  n_depth_features,
-#                  n_weather_features,
-#                  initial_lr1: float,
-#                  initial_lr2: float,
-#                  initial_lr3: float,
-#                  recurrent_weight_decay: float,
-#                  linear_weight_decay: float,
-#                  density_lambda: float,
-#                  hidden_dropout_rate: float,
-#                  input_dropout_rate: float,
-#                  multiproc: bool,
-#                  forward_size: int = 5,
-#                  weather_embedding_size: int = 8,
-#                  hidden_size: int = 5,
-#                  ):
-#         weather_preprocessor = LSTMZ0InitializerV2(n_weather_features=n_weather_features, weather_embedding_size=weather_embedding_size, dropout_rate=hidden_dropout_rate)
-#         density_regressor = MonotonicDensityRegressorV2(n_depth_features=n_depth_features, weather_embeddings_size=weather_embedding_size, hidden_size=hidden_size, forward_size=forward_size, input_dropout=input_dropout_rate, recurrent_dropout=hidden_dropout_rate, z_dropout=0.0, forward_dropout=hidden_dropout_rate)
-#         temperature_regressor = TemperatureRegressorV2(n_depth_features=n_depth_features, weather_embedding_size=weather_embedding_size, forward_size=2, input_dropout=input_dropout_rate, recurrent_dropout=hidden_dropout_rate, z_dropout=0.0, forward_dropout=hidden_dropout_rate)
-#         super().__init__(weather_preprocessor=weather_preprocessor, density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_depth_features=n_depth_features, n_weather_features=n_weather_features, lr=None, weight_decay=weight_decay, density_lambda=density_lambda, dropout_rate=dropout_rate, multiproc=multiproc)
-#         self.initial_lr1 = initial_lr1
-#         self.initial_lr2 = initial_lr2
-#         self.initial_lr3 = initial_lr3
-#
-#     def configure_optimizers(self) -> OptimizerLRScheduler:
-#         first_linear_kernel = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
-#                                name == "first_linear.weight"]
-#         other_params = [param for name, param in self.tz_regressor.temperature_regressor.named_parameters() if
-#                         name != "first_linear.weight"]
-#         return torch.optim.Adam([
-#             {"params": self.tz_regressor.weather_regressor.parameters(), "lr": self.initial_lr1},
-#             {"params": self.tz_regressor.density_regressor.parameters(), "lr": self.initial_lr2},
-#             {"params": first_linear_kernel, "weight_decay": self.weight_decay, "lr": self.initial_lr3},
-#             {"params": other_params, "lr": self.initial_lr3},
-#         ], eps=1e-7, weight_decay=0.0)
-
 class MyNet(LitTZRegressorV2):
     def __init__(self,
                  n_depth_features,
@@ -164,7 +127,19 @@ class MyNet(LitTZRegressorV2):
         temperature_regressor = TemperatureRegressorV2(n_depth_features=n_depth_features,
                                                        weather_embedding_size=weather_embedding_size,
                                                        forward_size=forward_size)
-        super().__init__(weather_preprocessor=weather_preprocessor, density_regressor=density_regressor, temperature_regressor=temperature_regressor, n_depth_features=n_depth_features, n_weather_features=n_weather_features, lr=None, weight_decay=weight_decay, density_lambda=density_lambda, dropout_rate=hidden_dropout_rate, multiproc=multiproc, optimizer_class=optimizer_class)
+        super().__init__(
+            weather_preprocessor=weather_preprocessor,
+            density_regressor=density_regressor,
+            temperature_regressor=temperature_regressor,
+            n_depth_features=n_depth_features,
+            n_weather_features=n_weather_features,
+            lr=None,
+            weight_decay=weight_decay,
+            density_lambda=density_lambda,
+            dropout_rate=hidden_dropout_rate,
+            multiproc=multiproc,
+            optimizer_class=optimizer_class
+        )
         self.lr1 = lr1
         self.lr2 = lr2
         self.lr3 = lr3

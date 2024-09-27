@@ -3,10 +3,7 @@ from typing import Tuple, Optional
 import torch
 from torch import nn, Tensor
 
-from .lstm import DropoutLSTM
 from .tools import get_sequential_linear_weights, get_sequential_linear_biases
-from ..models.pga import MonotonicLSTMCell
-from ..models.lstm import MonotonicLSTM
 
 class TheirTemperatureRegressor(nn.Module):
     def __init__(self, n_input_features: int):
