@@ -3,9 +3,6 @@
 lightning_logs/
 logs/
 /PGA_LSTM
-/results
-/examples
-/data
 /notebooks/tests
 fit-perf_logs*.txt
 ~$*.pptx
